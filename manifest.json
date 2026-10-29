@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "id": "tech.alatcerdas.omascreencast",
+  "name": "Omascreencast",
+  "version": "0.1.0",
+  "author": "Sam Ralial",
+  "license": "MIT",
+  "description": "Use a Chromecast TV as an arrangeable virtual second monitor, plus a monitor arranger for every connected display. Userspace only.",
+  "kinds": ["service", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omascreencast",
+    "description": "Cast a virtual network monitor to a Chromecast TV and arrange every display.",
+    "category": "System",
+    "aliases": [
+      "omascreencast",
+      "cast-monitor",
+      "virtual-monitor",
+      "network-monitor",
+      "display-arranger"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "codec": "auto",
+      "fps": 30,
+      "bitrateMbps": 6,
+      "audio": "Off"
+    },
+    "schema": [
+      {
+        "key": "codec",
+        "type": "enum",
+        "label": "Codec",
+        "options": ["auto", "hevc", "h264", "vp9", "av1"],
+        "defaultValue": "auto",
+        "description": "auto prefers HEVC when the receiver advertises it, otherwise falls back to H.264. VP9 is software-only; AV1 is experimental."
+      },
+      {
+        "key": "fps",
+        "type": "integer",
+        "label": "Frame rate",
+        "min": 10,
+        "max": 60,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "bitrateMbps",
+        "type": "integer",
+        "label": "Bitrate (Mbps)",
+        "min": 2,
+        "max": 25,
+        "step": 1,
+        "defaultValue": 6
+      },
+      {
+        "key": "audio",
+        "type": "enum",
+        "label": "Audio",
+        "options": ["Off", "On"],
+        "defaultValue": "Off",
+        "description": "Desktop audio arrives in v0.1.x."
+      }
+    ]
+  },
+  "permissions": ["system.display"]
+}

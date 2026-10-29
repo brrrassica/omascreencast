@@ -1,1 +1,12 @@
 plans/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local scratch
+*.bak
+*.tmp
