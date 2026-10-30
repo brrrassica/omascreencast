@@ -3,9 +3,6 @@
 An [Omarchy](https://omarchy.org) Quattro plugin that turns a Chromecast-capable TV into an
 **arrangeable virtual second monitor**, plus a **monitor arranger** for every connected display.
 
-<https://omascreencast.alatcerdas.tech> · GitHub Pages mirror:
-<https://brrrassica.github.io/omascreencast/>
-
 Unlike screen *mirroring*, omascreencast creates a Hyprland **headless virtual output**, extends your
 desktop onto it, and streams *that output* to the TV. The TV becomes a real second display you can place,
 resize, scale, rotate, mirror, or disable — alongside your physical monitors.
