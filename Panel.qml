@@ -31,6 +31,10 @@ Panel {
   readonly property int fps: setting("fps", 30)
   readonly property int bitrateMbps: setting("bitrateMbps", 6)
   readonly property string audio: setting("audio", "Off")
+  readonly property string language: setting("language", "auto")
+  readonly property string deviceNickname: setting("deviceNickname", "")
+  readonly property bool autoReconnect: setting("autoReconnect", false) === true
+  readonly property string uiLanguage: language === "auto" ? "en" : language
 
   // Tunables handed to session.py create (M3).
   function connectOptions() {
@@ -42,8 +46,53 @@ Panel {
     }
   }
 
+  // --- settings (M5) -----------------------------------------------------
+  function currentSettings() {
+    return {
+      codec: root.codec,
+      resolution: root.resolution,
+      fps: root.fps,
+      bitrateMbps: root.bitrateMbps,
+      audio: root.audio,
+      language: root.language,
+      deviceNickname: root.deviceNickname,
+      autoReconnect: root.autoReconnect
+    }
+  }
+
+  function applySettingsToService() {
+    if (root.service) root.service.applySettings(root.currentSettings())
+  }
+
+  // Applied locally first so the panel redraws on the click itself; the
+  // shell.json write comes back as the same value (same pattern as the
+  // first-party clock panel).
+  function persistSettings(values) {
+    var entry = { id: root.moduleName }
+    for (var existing in root.settings) {
+      if (existing !== "id") entry[existing] = root.settings[existing]
+    }
+    for (var key in values) {
+      if (Object.prototype.hasOwnProperty.call(values, key)) entry[key] = values[key]
+    }
+    root.settings = entry
+    if (root.bar && root.bar.shell
+        && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+    applySettingsToService()
+  }
+
+  Component.onCompleted: applySettingsToService()
+
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+
+  // Explicitly typed aliases keep qmllint static: qs.Commons declares
+  // Style.spacing/font as QtObject, so member access on them is untyped.
+  // fontToken()/fontPx() honour theme overrides exactly like Style.font.*.
+  readonly property int captionSize: Style.fontToken("caption", Style.fontPx(0.833))
+  readonly property int titleSize: Style.fontToken("title", Style.fontPx(1.167))
+  readonly property int bodySize: Style.fontToken("body", Style.fontPx(1.0))
 
   // --- state mirrored from the service (guarded for a missing service) ---
   readonly property var monitors: service ? service.monitors : []
@@ -62,28 +111,56 @@ Panel {
   readonly property bool displayBusy: service ? service.displayBusy : false
   readonly property bool provisioning: service ? service.provisioning : false
   readonly property var overlappingPairs: Model.overlappingDisplays(monitors)
+  readonly property string barState: service
+    ? service.barState
+    : Model.barState({ lastError: lastError, activeSession: activeSession,
+                       sessionBusy: sessionBusy, discovering: discovering })
+  readonly property int castElapsedSeconds: service ? service.castElapsedSeconds : 0
+  readonly property string activeTarget: service && service.activeTarget !== ""
+    ? service.activeTarget
+    : Model.sessionTargetLabel(activeSession, devices)
 
   readonly property string stateIcon: {
-    if (lastError !== "") return "󰅚"
-    if (activeSession !== null) return "󰒍"
-    if (discovering) return "󰑐"
+    if (barState === "error") return "󰅚"
+    if (barState === "casting") return "󰐊"
+    if (barState === "connecting") return "󰒍"
+    if (barState === "discovering") return "󰑐"
     if (devices.length > 0) return "󰍺"
     return "󰍹"
   }
 
   readonly property string statusText: {
-    if (lastError !== "") return lastError.toUpperCase()
-    if (activeSession !== null) {
-      const target = Model.sessionTargetLabel(activeSession, devices)
-      let line = Model.sessionPhaseLabel(activeSession) + " " + activeSession.name
-      if (target !== "") line += " → " + target
+    if (barState === "error") return lastError.toUpperCase()
+    if (barState === "casting") {
+      var target = activeTarget !== "" ? activeTarget : "TV"
+      var line = Model.tr(uiLanguage, "casting_to") + " " + target
+      if (castElapsedSeconds > 0) line += " · " + Model.formatElapsed(castElapsedSeconds)
       return line.toUpperCase()
     }
-    if (discovering) return "SEARCHING…"
+    if (barState === "connecting") return Model.tr(uiLanguage, "connecting").toUpperCase()
+    if (barState === "discovering") return Model.tr(uiLanguage, "searching").toUpperCase()
     var parts = []
-    parts.push(monitors.length + (monitors.length === 1 ? " display" : " displays"))
-    parts.push(devices.length + (devices.length === 1 ? " device" : " devices"))
+    parts.push(monitors.length + " " + Model.tr(uiLanguage, "displays"))
+    parts.push(devices.length + " " + Model.tr(uiLanguage, "devices"))
     return parts.join(" · ").toUpperCase()
+  }
+
+  // Destructive steps ask for confirmation (M5).
+  property bool confirmDisconnect: false
+
+  function requestDisconnect(device) {
+    if (!root.sessionActive) return
+    if (device && !root.isActiveDevice(device)) return
+    root.confirmDisconnect = true
+  }
+
+  function confirmDisconnectNow() {
+    root.confirmDisconnect = false
+    if (root.service) root.service.disconnect()
+  }
+
+  function cancelDisconnect() {
+    root.confirmDisconnect = false
   }
 
   // True when this discovered device is the one the active session casts to.
@@ -172,7 +249,11 @@ Panel {
 
   // Refresh the display list and re-sweep discovery whenever the panel opens.
   onOpenedChanged: {
-    if (!opened) return
+    if (!opened) {
+      confirmDisconnect = false
+      return
+    }
+    applySettingsToService()
     if (service) {
       service.refreshMonitors()
       service.refreshDisplayRules()
@@ -241,7 +322,7 @@ Panel {
         if (root.focusSection !== "devices" || !root.service) return
         var device = root.devices[root.selectedIndex]
         if (!device) return
-        if (root.isActiveDevice(device)) root.service.disconnect()
+        if (root.isActiveDevice(device)) root.requestDisconnect(device)
         else root.service.connectDevice(device, root.connectOptions())
       }
       onCloseRequested: root.close()
@@ -273,8 +354,8 @@ Panel {
               id: heroIcon
               textFormat: Text.PlainText
               text: root.stateIcon
-              color: root.lastError !== "" ? Color.urgent : root.bar.foreground
-              font.family: root.bar.fontFamily
+              color: root.lastError !== "" ? Color.urgent : root.foreground
+              font.family: root.fontFamily
               font.pixelSize: Style.font.display
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
@@ -291,9 +372,9 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 text: "Omascreencast"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.title
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: root.titleSize
                 font.bold: true
                 elide: Text.ElideRight
                 width: parent.width
@@ -302,9 +383,9 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 text: root.statusText
-                color: root.lastError !== "" ? Color.urgent : Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
+                color: root.lastError !== "" ? Color.urgent : Qt.darker(root.foreground, 1.4)
+                font.family: root.fontFamily
+                font.pixelSize: root.captionSize
                 font.bold: true
                 font.letterSpacing: 1.2
                 elide: Text.ElideRight
@@ -313,8 +394,115 @@ Panel {
             }
           }
 
+          // ---------- Active session (M5) ----------
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.sessionActive
+
+            PanelSeparator { foreground: root.foreground }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                textFormat: Text.PlainText
+                text: "󰐊"
+                color: Commons.Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: root.titleSize
+                width: Style.space(22)
+                horizontalAlignment: Text.AlignHCenter
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Column {
+                width: parent.width - Style.space(22) - disconnectButton.width - Style.space(16)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(1)
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: root.activeTarget !== ""
+                    ? root.activeTarget
+                    : String(root.activeSession ? root.activeSession.name : "")
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: root.bodySize
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: root.barState === "connecting"
+                    ? Model.tr(root.uiLanguage, "connecting")
+                    : Model.tr(root.uiLanguage, "casting") + " · "
+                      + Model.formatElapsed(root.castElapsedSeconds)
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                  elide: Text.ElideRight
+                }
+              }
+
+              Button {
+                id: disconnectButton
+                text: Model.tr(root.uiLanguage, "disconnect")
+                iconText: "󰓛"
+                bordered: true
+                enabled: !root.sessionBusy
+                opacity: enabled ? 1 : 0.45
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                onClicked: root.requestDisconnect(null)
+              }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.confirmDisconnect
+              width: parent.width
+              text: Model.tr(root.uiLanguage, "confirm_disconnect")
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+            }
+
+            Row {
+              visible: root.confirmDisconnect
+              spacing: Style.space(8)
+
+              Button {
+                text: Model.tr(root.uiLanguage, "disconnect")
+                iconText: "󰓛"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(6)
+                onClicked: root.confirmDisconnectNow()
+              }
+
+              Button {
+                text: "Cancel"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(6)
+                onClicked: root.cancelDisconnect()
+              }
+            }
+          }
+
           // ---------- Displays ----------
-          PanelSeparator { foreground: root.bar.foreground }
+          PanelSeparator { foreground: root.foreground }
 
           Column {
             width: parent.width
@@ -322,8 +510,8 @@ Panel {
 
             PanelSectionHeader {
               text: "DISPLAYS"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
+              foreground: root.foreground
+              fontFamily: root.fontFamily
             }
 
             Text {
@@ -331,8 +519,8 @@ Panel {
               visible: root.monitors.length === 0
               width: parent.width
               text: "No displays reported by Hyprland."
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -353,7 +541,7 @@ Panel {
                 return pair.join(" / ")
               }).join(", ")
               color: Color.urgent
-              font.family: root.bar.fontFamily
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -364,7 +552,7 @@ Panel {
               width: parent.width
               text: root.displayError
               color: Color.urgent
-              font.family: root.bar.fontFamily
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -381,7 +569,7 @@ Panel {
                   + (root.sessionOrphans.length === 1 ? ": " : "s: ")
                   + root.sessionOrphans.join(", ")
                 color: Color.urgent
-                font.family: root.bar.fontFamily
+                font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.Wrap
               }
@@ -389,10 +577,10 @@ Panel {
               Button {
                 id: orphanButton
                 text: "Clean up"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                horizontalPadding: Style.spacing.sm
-                verticalPadding: Style.spacing.controlPaddingY
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(6)
                 enabled: !root.sessionBusy
                 onClicked: if (root.service) root.service.cleanupOrphan(root.sessionOrphans[0])
               }
@@ -413,7 +601,7 @@ Panel {
           }
 
           // ---------- Chromecast devices ----------
-          PanelSeparator { foreground: root.bar.foreground }
+          PanelSeparator { foreground: root.foreground }
 
           Column {
             width: parent.width
@@ -426,8 +614,8 @@ Panel {
               PanelSectionHeader {
                 id: devicesHeader
                 text: "CHROMECAST"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
+                foreground: root.foreground
+                fontFamily: root.fontFamily
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
               }
@@ -439,10 +627,10 @@ Panel {
                 iconText: "󰑐"
                 iconSpinning: root.discovering
                 tooltipText: "Search again"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                horizontalPadding: Style.spacing.sm
-                verticalPadding: Style.spacing.controlPaddingY
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(6)
                 onClicked: if (root.service) root.service.refreshDevices()
               }
             }
@@ -454,8 +642,8 @@ Panel {
               text: root.discovering
                 ? "Searching the local network…"
                 : "No Chromecast devices found. Make sure the TV is on and on the same network, or add its IP below."
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -475,7 +663,7 @@ Panel {
           }
 
           // ---------- Manual IP ----------
-          PanelSeparator { foreground: root.bar.foreground }
+          PanelSeparator { foreground: root.foreground }
 
           Column {
             width: parent.width
@@ -483,16 +671,16 @@ Panel {
 
             PanelSectionHeader {
               text: "MANUAL IP"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
+              foreground: root.foreground
+              fontFamily: root.fontFamily
             }
 
             Text {
               textFormat: Text.PlainText
               width: parent.width
               text: "For mDNS-blocked or cross-VLAN receivers."
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -505,8 +693,8 @@ Panel {
                 id: manualField
                 width: parent.width - addButton.width - parent.spacing
                 placeholderText: "192.168.1.50"
-                foreground: root.bar.foreground
-                font.family: root.bar.fontFamily
+                foreground: root.foreground
+                font.family: root.fontFamily
                 onAccepted: root.submitManual()
               }
 
@@ -515,15 +703,217 @@ Panel {
                 text: "Add"
                 iconText: "󰐕"
                 bordered: true
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
+                foreground: root.foreground
+                fontFamily: root.fontFamily
                 onClicked: root.submitManual()
               }
             }
           }
 
+          // ---------- Settings (M5) ----------
+          PanelSeparator { foreground: root.foreground }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              text: "SETTINGS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "Applies to the next connection."
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Column {
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Language"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                }
+
+                ComboBox {
+                  width: Style.space(168)
+                  model: ["Auto", "English", "Bahasa Indonesia"]
+                  currentIndex: {
+                    var idx = ["auto", "en", "id"].indexOf(root.language)
+                    return idx < 0 ? 0 : idx
+                  }
+                  font.family: root.fontFamily
+                  onActivated: root.persistSettings({
+                    language: ["auto", "en", "id"][currentIndex]
+                  })
+                }
+              }
+
+              Column {
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Codec"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                }
+
+                ComboBox {
+                  width: Style.space(120)
+                  model: ["Auto", "HEVC", "H.264", "VP9"]
+                  currentIndex: {
+                    var idx = ["auto", "hevc", "h264", "vp9"].indexOf(root.codec)
+                    return idx < 0 ? 0 : idx
+                  }
+                  font.family: root.fontFamily
+                  onActivated: root.persistSettings({
+                    codec: ["auto", "hevc", "h264", "vp9"][currentIndex]
+                  })
+                }
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Column {
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Resolution"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                }
+
+                ComboBox {
+                  width: Style.space(168)
+                  model: ["1920x1080@60", "1600x900@60", "1280x720@60"]
+                  currentIndex: {
+                    var idx = ["1920x1080@60", "1600x900@60", "1280x720@60"]
+                      .indexOf(root.resolution)
+                    return idx < 0 ? 0 : idx
+                  }
+                  font.family: root.fontFamily
+                  onActivated: root.persistSettings({ resolution: currentText })
+                }
+              }
+
+              Column {
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "FPS"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                }
+
+                ComboBox {
+                  width: Style.space(82)
+                  model: ["24", "30", "50", "60"]
+                  currentIndex: {
+                    var idx = ["24", "30", "50", "60"].indexOf(String(root.fps))
+                    return idx < 0 ? 1 : idx
+                  }
+                  font.family: root.fontFamily
+                  onActivated: root.persistSettings({ fps: Number(currentText) })
+                }
+              }
+
+              Column {
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Mbps"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                }
+
+                ComboBox {
+                  width: Style.space(82)
+                  model: ["4", "6", "8", "10", "12", "16"]
+                  currentIndex: {
+                    var idx = ["4", "6", "8", "10", "12", "16"]
+                      .indexOf(String(root.bitrateMbps))
+                    return idx < 0 ? 1 : idx
+                  }
+                  font.family: root.fontFamily
+                  onActivated: root.persistSettings({
+                    bitrateMbps: Number(currentText)
+                  })
+                }
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Column {
+                spacing: Style.space(2)
+                width: parent.width - reconnectToggle.width - parent.spacing
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Device nickname"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                }
+
+                TextField {
+                  id: nicknameField
+                  width: parent.width
+                  text: root.deviceNickname
+                  placeholderText: "Living room TV"
+                  foreground: root.foreground
+                  font.family: root.fontFamily
+                  onEditingFinished: root.persistSettings({
+                    deviceNickname: String(text || "").trim()
+                  })
+                }
+              }
+
+              Button {
+                id: reconnectToggle
+                text: root.autoReconnect
+                  ? "Auto-reconnect: On" : "Auto-reconnect: Off"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(6)
+                anchors.bottom: parent.bottom
+                onClicked: root.persistSettings({
+                  autoReconnect: !root.autoReconnect
+                })
+              }
+            }
+          }
+
           // ---------- Doctor ----------
-          PanelSeparator { foreground: root.bar.foreground }
+          PanelSeparator { foreground: root.foreground }
 
           Column {
             width: parent.width
@@ -536,8 +926,8 @@ Panel {
               PanelSectionHeader {
                 id: doctorHeader
                 text: "DOCTOR"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
+                foreground: root.foreground
+                fontFamily: root.fontFamily
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
               }
@@ -555,10 +945,10 @@ Panel {
                   bordered: true
                   enabled: !root.provisioning
                   opacity: enabled ? 1 : 0.45
-                  foreground: root.bar.foreground
-                  fontFamily: root.bar.fontFamily
-                  horizontalPadding: Style.spacing.sm
-                  verticalPadding: Style.spacing.controlPaddingY
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.space(4)
+                  verticalPadding: Style.space(6)
                   onClicked: if (root.service) root.service.provisionDependencies()
                 }
 
@@ -566,10 +956,10 @@ Panel {
                   id: doctorRerun
                   text: "Re-run"
                   iconText: "󰑐"
-                  foreground: root.bar.foreground
-                  fontFamily: root.bar.fontFamily
-                  horizontalPadding: Style.spacing.sm
-                  verticalPadding: Style.spacing.controlPaddingY
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.space(4)
+                  verticalPadding: Style.space(6)
                   onClicked: if (root.service) root.service.runDoctor()
                 }
               }
@@ -583,8 +973,8 @@ Panel {
                 : (root.doctor.pythonOk === true
                    ? "Capture tools are missing — see below."
                    : "Python dependencies are missing — press Set up.")
-              color: root.depsOk ? Qt.darker(root.bar.foreground, 1.3) : Color.urgent
-              font.family: root.bar.fontFamily
+              color: root.depsOk ? Qt.darker(root.foreground, 1.3) : Color.urgent
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               font.bold: true
               wrapMode: Text.Wrap
@@ -596,7 +986,7 @@ Panel {
               width: parent.width
               text: "Missing tools: " + (root.doctor.missingBinaries || []).join(", ")
               color: Color.urgent
-              font.family: root.bar.fontFamily
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -607,7 +997,7 @@ Panel {
               width: parent.width
               text: "Missing Python modules: " + (root.doctor.missingPython || []).join(", ")
               color: Color.urgent
-              font.family: root.bar.fontFamily
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -617,8 +1007,8 @@ Panel {
               visible: root.doctor.venv !== ""
               width: parent.width
               text: "Private venv: " + (root.doctor.venvReady ? "ready" : (root.doctor.venvExists ? "present (incomplete)" : "not created"))
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -628,8 +1018,8 @@ Panel {
               visible: root.doctor.fastPath !== ""
               width: parent.width
               text: "Fast path (optional, root): " + root.doctor.fastPath
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -639,8 +1029,8 @@ Panel {
               visible: root.doctor.firewallRule !== ""
               width: parent.width
               text: "Stream port " + root.doctor.streamPort + " must be reachable. If blocked: " + root.doctor.firewallRule
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
             }
@@ -676,7 +1066,7 @@ Panel {
     implicitHeight: Style.space(150)
     color: "transparent"
     border.width: 1
-    border.color: Qt.darker(root.bar.foreground, 2.4)
+    border.color: Qt.darker(root.foreground, 2.4)
     radius: Style.space(6)
     clip: true
 
@@ -706,16 +1096,16 @@ Panel {
         opacity: isDisabled ? 0.35 : 1
         color: isVirtual ? Qt.darker(Commons.Color.accent, 2.6) : "transparent"
         border.width: 1
-        border.color: isVirtual ? Commons.Color.accent : root.bar.foreground
+        border.color: isVirtual ? Commons.Color.accent : root.foreground
 
         Text {
           anchors.fill: parent
           anchors.margins: Style.space(2)
           textFormat: Text.PlainText
           text: String(modelData.name || "")
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: root.captionSize
           elide: Text.ElideRight
           horizontalAlignment: Text.AlignHCenter
           verticalAlignment: Text.AlignVCenter
@@ -807,10 +1197,10 @@ Panel {
     hasCursor: root.cursorActive && root.focusSection === "displays" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(monitorRow)
     current: isFocused
-    foreground: root.bar.foreground
-    fill: Style.hoverFillFor(root.bar.foreground, Commons.Color.accent)
-    currentFill: Style.selectedFillFor(root.bar.foreground, Commons.Color.accent)
-    implicitHeight: monitorColumn.implicitHeight + Style.spacing.xl
+    foreground: root.foreground
+    fill: Style.hoverFillFor(root.foreground, Commons.Color.accent)
+    currentFill: Style.selectedFillFor(root.foreground, Commons.Color.accent)
+    implicitHeight: monitorColumn.implicitHeight + Style.space(10)
 
     Column {
       id: monitorColumn
@@ -830,9 +1220,9 @@ Panel {
         Text {
           textFormat: Text.PlainText
           text: monitorRow.isVirtual ? "󰒍" : "󰍹"
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: root.titleSize
           width: Style.space(22)
           horizontalAlignment: Text.AlignHCenter
           anchors.verticalCenter: parent.verticalCenter
@@ -843,9 +1233,9 @@ Panel {
           text: Model.monitorLabel(monitorRow.display)
             + monitorRow.castSuffix
             + (monitorRow.isFocused ? " · focused" : "")
-          color: monitorRow.castTarget ? Commons.Color.accent : root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.body
+          color: monitorRow.castTarget ? Commons.Color.accent : root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: root.bodySize
           elide: Text.ElideRight
           width: parent.width - Style.space(22) - Style.space(14) - Style.space(34)
             - arrangeButton.width - Style.space(24)
@@ -857,8 +1247,8 @@ Panel {
           text: monitorRow.castTarget ? "CAST" : (monitorRow.isVirtual ? "NET" : "")
           visible: monitorRow.castTarget || monitorRow.isVirtual
           color: Commons.Color.accent
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
+          font.family: root.fontFamily
+          font.pixelSize: root.captionSize
           font.bold: true
           width: Style.space(30)
           horizontalAlignment: Text.AlignRight
@@ -869,10 +1259,10 @@ Panel {
           id: arrangeButton
           text: monitorRow.expanded ? "Close" : "Arrange"
           bordered: true
-          foreground: root.bar.foreground
-          fontFamily: root.bar.fontFamily
-          horizontalPadding: Style.spacing.sm
-          verticalPadding: Style.spacing.controlPaddingY
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          horizontalPadding: Style.space(4)
+          verticalPadding: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
           onClicked: monitorRow.expanded = !monitorRow.expanded
         }
@@ -893,15 +1283,15 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: "Mode"
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: root.captionSize
             }
             ComboBox {
               width: Style.space(160)
               model: monitorRow.modeChoices
               currentIndex: Math.max(0, monitorRow.modeChoices.indexOf(String(monitorRow.edits.mode)))
-              font.family: root.bar.fontFamily
+              font.family: root.fontFamily
               onActivated: monitorRow.update("mode", currentText)
             }
           }
@@ -911,15 +1301,15 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: "Scale"
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: root.captionSize
             }
             ComboBox {
               width: Style.space(78)
               model: monitorRow.scaleChoices
               currentIndex: Math.max(0, monitorRow.scaleChoices.indexOf(String(monitorRow.edits.scale)))
-              font.family: root.bar.fontFamily
+              font.family: root.fontFamily
               onActivated: monitorRow.update("scale", Number(currentText))
             }
           }
@@ -929,15 +1319,15 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: "Rotate"
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: root.captionSize
             }
             ComboBox {
               width: Style.space(96)
               model: monitorRow.orientationChoices
               currentIndex: Math.max(0, Math.min(3, Number(monitorRow.edits.transform || 0)))
-              font.family: root.bar.fontFamily
+              font.family: root.fontFamily
               onActivated: monitorRow.update("transform", currentIndex)
             }
           }
@@ -952,9 +1342,9 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: "Mirror"
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: root.captionSize
             }
             ComboBox {
               width: Style.space(160)
@@ -964,7 +1354,7 @@ Panel {
                 var idx = monitorRow.mirrorChoices.indexOf(mirror === "" ? "None" : mirror)
                 return idx < 0 ? 0 : idx
               }
-              font.family: root.bar.fontFamily
+              font.family: root.fontFamily
               onActivated: monitorRow.update("mirror", currentIndex === 0 ? "" : currentText)
             }
           }
@@ -972,10 +1362,10 @@ Panel {
           Button {
             text: monitorRow.edits.disabled ? "Disabled" : "Enabled"
             bordered: true
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            horizontalPadding: Style.spacing.sm
-            verticalPadding: Style.spacing.controlPaddingY
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            horizontalPadding: Style.space(4)
+            verticalPadding: Style.space(6)
             anchors.bottom: parent.bottom
             onClicked: monitorRow.update("disabled", monitorRow.edits.disabled !== true)
           }
@@ -989,9 +1379,9 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width - applyButton.width - saveButton.width - Style.space(16)
             text: "Position " + String(monitorRow.edits.position || "")
-            color: Qt.darker(root.bar.foreground, 1.4)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
+            color: Qt.darker(root.foreground, 1.4)
+            font.family: root.fontFamily
+            font.pixelSize: root.captionSize
             elide: Text.ElideRight
             anchors.verticalCenter: parent.verticalCenter
           }
@@ -1003,10 +1393,10 @@ Panel {
             bordered: true
             enabled: !root.displayBusy
             opacity: enabled ? 1 : 0.45
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            horizontalPadding: Style.spacing.sm
-            verticalPadding: Style.spacing.controlPaddingY
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            horizontalPadding: Style.space(4)
+            verticalPadding: Style.space(6)
             onClicked: root.applyDisplay(monitorRow.display, monitorRow.edits)
           }
 
@@ -1017,10 +1407,10 @@ Panel {
             bordered: true
             enabled: !root.displayBusy
             opacity: enabled ? 1 : 0.45
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            horizontalPadding: Style.spacing.sm
-            verticalPadding: Style.spacing.controlPaddingY
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            horizontalPadding: Style.space(4)
+            verticalPadding: Style.space(6)
             onClicked: root.saveDisplay(monitorRow.display, monitorRow.edits)
           }
         }
@@ -1032,9 +1422,9 @@ Panel {
           text: monitorRow.isVirtual
             ? "Not saved yet — use Save to persist this virtual output's layout."
             : "No saved rule — Apply is temporary; Save writes monitors.lua (backed up)."
-          color: Qt.darker(root.bar.foreground, 1.4)
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
+          color: Qt.darker(root.foreground, 1.4)
+          font.family: root.fontFamily
+          font.pixelSize: root.captionSize
           wrapMode: Text.Wrap
         }
       }
@@ -1062,10 +1452,10 @@ Panel {
 
     hasCursor: root.cursorActive && root.focusSection === "devices" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(deviceRow)
-    foreground: root.bar.foreground
-    fill: Style.hoverFillFor(root.bar.foreground, Commons.Color.accent)
-    currentFill: Style.selectedFillFor(root.bar.foreground, Commons.Color.accent)
-    implicitHeight: deviceInner.implicitHeight + Style.spacing.xl
+    foreground: root.foreground
+    fill: Style.hoverFillFor(root.foreground, Commons.Color.accent)
+    currentFill: Style.selectedFillFor(root.foreground, Commons.Color.accent)
+    implicitHeight: deviceInner.implicitHeight + Style.space(10)
 
     Row {
       id: deviceInner
@@ -1079,9 +1469,9 @@ Panel {
       Text {
         textFormat: Text.PlainText
         text: "󰐊"
-        color: deviceRow.device.online ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.6)
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.title
+        color: deviceRow.device.online ? root.foreground : Qt.darker(root.foreground, 1.6)
+        font.family: root.fontFamily
+        font.pixelSize: root.titleSize
         width: Style.space(22)
         horizontalAlignment: Text.AlignHCenter
         anchors.verticalCenter: parent.verticalCenter
@@ -1097,9 +1487,9 @@ Panel {
           textFormat: Text.PlainText
           width: parent.width
           text: Model.deviceLabel(deviceRow.device)
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.body
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: root.bodySize
           elide: Text.ElideRight
         }
 
@@ -1108,9 +1498,9 @@ Panel {
           width: parent.width
           visible: deviceRow.device.model !== "" && deviceRow.device.model !== deviceRow.device.name
           text: deviceRow.device.model
-          color: Qt.darker(root.bar.foreground, 1.4)
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
+          color: Qt.darker(root.foreground, 1.4)
+          font.family: root.fontFamily
+          font.pixelSize: root.captionSize
           elide: Text.ElideRight
         }
       }
@@ -1119,27 +1509,32 @@ Panel {
         id: codecText
         textFormat: Text.PlainText
         text: Model.deviceCodecLabel(deviceRow.device)
-        color: Qt.darker(root.bar.foreground, 1.3)
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.caption
+        color: Qt.darker(root.foreground, 1.3)
+        font.family: root.fontFamily
+        font.pixelSize: root.captionSize
         anchors.verticalCenter: parent.verticalCenter
       }
 
       Button {
         id: connectButton
-        text: deviceRow.isActive ? "Stop" : "Cast"
+        text: deviceRow.isActive
+          ? Model.tr(root.uiLanguage, "disconnect")
+          : Model.tr(root.uiLanguage, "use_tv")
         iconText: deviceRow.isActive ? "󰓛" : "󰐊"
+        tooltipText: deviceRow.isActive
+          ? "Stop the stream and remove the virtual monitor"
+          : "Use TV as second monitor"
         bordered: true
-        foreground: root.bar.foreground
-        fontFamily: root.bar.fontFamily
-        horizontalPadding: Style.spacing.sm
-        verticalPadding: Style.spacing.controlPaddingY
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        horizontalPadding: Style.space(4)
+        verticalPadding: Style.space(6)
         enabled: !root.sessionBusy && (!root.sessionActive || deviceRow.isActive)
         opacity: enabled ? 1 : 0.45
         anchors.verticalCenter: parent.verticalCenter
         onClicked: {
           if (!root.service) return
-          if (deviceRow.isActive) root.service.disconnect()
+          if (deviceRow.isActive) root.requestDisconnect(deviceRow.device)
           else root.service.connectDevice(deviceRow.device, root.connectOptions())
         }
       }

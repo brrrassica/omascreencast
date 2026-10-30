@@ -60,13 +60,100 @@ Item {
   property string pythonPath: "python3"
   property bool ready: false
 
+  // --- M5 settings (mirrored from the bar entry by Panel.qml) ------------
+  property var settings: ({})
+  property string language: "auto"
+  property bool autoReconnect: false
+  property string deviceNickname: ""
+  property string resolution: "1920x1080@60"
+  property int fps: 30
+  property int bitrateMbps: 6
+  property string codec: "auto"
+
+  // --- runtime phase tracking (driven by session.py events) --------------
+  property string eventPhase: ""
+  property string eventDetail: ""
+  property int eventsRetries: 0
+  property bool userInitiatedStop: false
+  property int reconnectAttempts: 0
+  property int elapsedTick: 0
+  property var monitorNames: []
+  // Notification queue so a burst of state changes is delivered in order.
+  property var notifyQueue: []
+
   readonly property int deviceCount: devices.length
   readonly property int monitorCount: monitors.length
   readonly property bool depsOk: doctor.ok === true
   readonly property bool pythonOk: doctor.pythonOk === true
   readonly property bool pipelineOk: doctor.pipelineOk === true
+  readonly property string uiLanguage: language === "auto" ? "en" : language
+  readonly property string activePhase: eventPhase !== ""
+    ? eventPhase : (activeSession ? String(activeSession.phase || "") : "")
   readonly property bool casting: activeSession !== null
-    && String(activeSession.phase || "") !== "stopped"
+    && ["", "starting", "casting"].indexOf(String(activePhase)) !== -1
+  readonly property int castElapsedSeconds: {
+    var tick = elapsedTick
+    if (activePhase !== "casting") return 0
+    return Model.sessionElapsedSeconds(activeSession, Date.now())
+  }
+  readonly property string barState: Model.barState({
+    lastError: lastError,
+    activeSession: activeSession,
+    sessionBusy: sessionBusy,
+    discovering: discovering
+  })
+  readonly property string activeTarget: {
+    if (!activeSession) return ""
+    if (deviceNickname !== "") return deviceNickname
+    return Model.sessionTargetLabel(activeSession, devices)
+  }
+
+  // --- settings / notifications -----------------------------------------
+  function applySettings(values) {
+    var v = values || {}
+    settings = v
+    language = String(v.language || "auto")
+    autoReconnect = v.autoReconnect === true
+    deviceNickname = String(v.deviceNickname || "")
+    resolution = String(v.resolution || "1920x1080@60")
+    fps = Number(v.fps || 30)
+    bitrateMbps = Number(v.bitrateMbps || 6)
+    codec = String(v.codec || "auto")
+  }
+
+  function connectOptions() {
+    return {
+      res: resolution,
+      fps: fps,
+      bitrate: String(bitrateMbps) + "M",
+      codec: codec
+    }
+  }
+
+  function notify(title, body, urgency) {
+    var t = String(title || "").trim()
+    if (t === "") return
+    var entry = {
+      title: t,
+      body: String(body || ""),
+      urgency: String(urgency || "normal")
+    }
+    var queue = notifyQueue.slice()
+    queue.push(entry)
+    notifyQueue = queue
+    if (!notifyProc.running) nextNotify()
+  }
+
+  function nextNotify() {
+    if (notifyQueue.length === 0) return
+    var entry = notifyQueue[0]
+    notifyQueue = notifyQueue.slice(1)
+    var args = ["notify-send", "-a", "Omascreencast", "-u", entry.urgency]
+    if (entry.body !== "") args.push(entry.title, entry.body)
+    else args.push(entry.title)
+    notifyProc.command = args
+    notifyProc.running = true
+  }
 
   // --- actions -----------------------------------------------------------
 
@@ -184,6 +271,7 @@ Item {
       lastError = "Disconnect the active session first"
       return
     }
+    reconnectTimer.stop()
     var opts = options || {}
     var cmd = [pythonPath, sessionScript, "create"]
     if (device.uuid) cmd.push("--device", String(device.uuid))
@@ -194,6 +282,10 @@ Item {
     if (opts.bitrate) cmd.push("--bitrate", String(opts.bitrate))
     if (opts.codec) cmd.push("--codec", String(opts.codec))
     lastError = ""
+    eventDetail = ""
+    eventPhase = "starting"
+    userInitiatedStop = false
+    reconnectAttempts = 0
     sessionBusy = true
     createProc.command = cmd
     createProc.running = true
@@ -201,6 +293,9 @@ Item {
 
   function disconnect() {
     if (sessionBusy || activeSession === null) return
+    reconnectTimer.stop()
+    reconnectAttempts = 0
+    userInitiatedStop = true
     lastError = ""
     sessionBusy = true
     removeProc.command = [pythonPath, sessionScript, "remove"]
@@ -226,6 +321,111 @@ Item {
     discovering = true
     discoveryProc.command = [pythonPath, castEngine, "discovery", "--watch"]
     discoveryProc.running = true
+  }
+
+  // --- M5 phase event stream --------------------------------------------
+  // The engine writes JSONL phase events to its log; session.py follows only
+  // this run's slice and re-emits them on stdout. The panel/service state is
+  // therefore driven by events, not by polling session.json.
+  function startEvents() {
+    if (eventsProc.running || activeSession === null) return
+    eventPhase = String(activeSession.phase || "")
+    eventsProc.command = [pythonPath, sessionScript, "events"]
+    eventsProc.running = true
+  }
+
+  function stopEvents() {
+    eventsRetries = 0
+    if (eventsProc.running) eventsProc.running = false
+  }
+
+  function handlePhaseEvent(ev) {
+    if (!ev || ev.type === "") return
+    if (ev.phase === "" && ev.detail === "") return
+    var previous = activeSession || {}
+    var prevPhase = String(previous.phase || "")
+    if (ev.phase !== "") {
+      eventPhase = ev.phase
+      if (ev.detail !== "") eventDetail = ev.detail
+      var updated = {}
+      for (var key in previous) {
+        if (Object.prototype.hasOwnProperty.call(previous, key)) updated[key] = previous[key]
+      }
+      updated.phase = ev.phase
+      if (ev.url !== "") updated.url = ev.url
+      if (ev.detail !== "") updated.detail = ev.detail
+      activeSession = updated
+    }
+
+    if (ev.phase === "casting" && prevPhase !== "casting") {
+      reconnectAttempts = 0
+      reconnectTimer.stop()
+      notify(Model.tr(uiLanguage, "connected"), activeTarget, "normal")
+      refreshMonitors()
+    } else if (ev.phase === "error") {
+      lastError = ev.detail !== "" ? ev.detail : Model.tr(uiLanguage, "cast_failed")
+      notify(Model.tr(uiLanguage, "cast_failed"), lastError, "critical")
+      Qt.callLater(root.reconcileSession)
+    } else if (ev.phase === "idle" || ev.phase === "stopped") {
+      var wasCasting = prevPhase === "casting" || prevPhase === "starting"
+      if (wasCasting && !userInitiatedStop) {
+        notify(Model.tr(uiLanguage, "session_ended"), activeTarget, "low")
+        scheduleReconnect()
+      }
+      eventPhase = ""
+      activeSession = null
+      refreshMonitors()
+      reconcileSession()
+    }
+  }
+
+  function scheduleReconnect() {
+    if (!autoReconnect || reconnectAttempts >= 3) return
+    var device = Model.reconnectDeviceFromSession(activeSession)
+    if (!device) return
+    reconnectAttempts = reconnectAttempts + 1
+    reconnectTimer.device = device
+    reconnectTimer.interval = 3000 * reconnectAttempts
+    reconnectTimer.restart()
+    notify(Model.tr(uiLanguage, "auto_reconnect"), device.name, "low")
+  }
+
+  // --- M5 hotplug handling ----------------------------------------------
+  function applyMonitors(list) {
+    var previous = monitorNames
+    monitors = list
+    var names = []
+    var physical = []
+    for (var i = 0; i < list.length; i++) {
+      var name = String(list[i].name || "")
+      names.push(name)
+      if (list[i].virtual !== true) physical.push(name)
+    }
+    monitorNames = names
+    if (activeSession === null) return
+    if (names.indexOf(String(activeSession.name || "")) < 0) {
+      reconcileSession()
+      return
+    }
+    // A physical hotplug must never break the virtual output: re-place it
+    // adjacent to whatever display remains, without touching the stream.
+    if (previous.length > 0) {
+      var prevPhysical = []
+      for (var j = 0; j < previous.length; j++) {
+        if (String(previous[j]).indexOf("HEADLESS") !== 0) prevPhysical.push(String(previous[j]))
+      }
+      if (prevPhysical.sort().join(",") !== physical.sort().join(",")) scheduleRearrange()
+    }
+  }
+
+  function scheduleRearrange() {
+    rearrangeTimer.restart()
+  }
+
+  function runRearrange() {
+    if (rearrangeProc.running) return
+    rearrangeProc.command = [pythonPath, sessionScript, "rearrange"]
+    rearrangeProc.running = true
   }
 
   Component.onCompleted: {
@@ -368,14 +568,20 @@ Item {
         var r = Model.parseSession(text)
         if (!r.ok) return
         root.activeSession = r.active
-        if (!r.active) return
+        if (!r.active) {
+          root.eventPhase = ""
+          return
+        }
         var phase = String(r.active.phase || "")
         // A finished cast leaves phase "stopped"; a crashed engine leaves a
         // dead pid or a vanished output. Both converge automatically.
         if (phase === "stopped"
             || ((phase === "starting" || phase === "casting")
-                && (r.alive === false || r.outputPresent === false)))
+                && (r.alive === false || r.outputPresent === false))) {
           root.reconcileSession()
+        } else {
+          root.startEvents()
+        }
       }
     }
     stderr: StdioCollector {
@@ -394,6 +600,8 @@ Item {
         root.sessionOrphans = r.orphans
         if (!r.ok && r.error !== "") root.lastError = r.error
         if (r.cleaned) root.refreshMonitors()
+        if (r.active) root.startEvents()
+        else root.eventPhase = ""
       }
     }
     stderr: StdioCollector {
@@ -411,9 +619,13 @@ Item {
         root.sessionBusy = false
         if (r.ok) {
           root.activeSession = r.active
+          root.eventPhase = "starting"
           root.lastError = ""
+          root.startEvents()
         } else {
           root.lastError = r.error !== "" ? r.error : "Could not create the virtual monitor"
+          root.eventPhase = ""
+          root.notify(Model.tr(root.uiLanguage, "cast_failed"), root.lastError, "critical")
         }
         root.refreshMonitors()
         root.refreshSession()
@@ -435,9 +647,16 @@ Item {
         root.sessionBusy = false
         if (r.ok) {
           root.activeSession = null
+          root.eventPhase = ""
+          root.stopEvents()
+          root.userInitiatedStop = false
+          root.reconnectAttempts = 0
+          root.notify(Model.tr(root.uiLanguage, "disconnected"),
+            root.deviceNickname !== "" ? root.deviceNickname : "Omascreencast", "normal")
           if (r.warnings.length > 0) root.lastError = r.warnings.join("; ")
         } else {
           root.lastError = r.error !== "" ? r.error : "Could not stop the session"
+          root.notify(Model.tr(root.uiLanguage, "cast_failed"), root.lastError, "critical")
         }
         root.refreshMonitors()
         root.reconcileSession()
@@ -528,23 +747,94 @@ Item {
     onExited: if (root.displayBusy) root.displayBusy = false
   }
 
+  // --- live phase events (M5) -------------------------------------------
+  Process {
+    id: eventsProc
+    stdout: SplitParser {
+      onRead: function(line) {
+        root.handlePhaseEvent(Model.parseSessionEvent(line))
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+    onExited: {
+      // The follower ends on a terminal phase; if the engine is still alive
+      // (e.g. the follower was restarted) retry a bounded number of times.
+      if (root.activeSession !== null && !root.userInitiatedStop
+          && root.casting && root.eventsRetries < 3) {
+        root.eventsRetries = root.eventsRetries + 1
+        eventsRetry.restart()
+      }
+    }
+  }
+
+  Timer {
+    id: eventsRetry
+    interval: 1000
+    repeat: false
+    onTriggered: root.startEvents()
+  }
+
+  // Re-place the virtual output after a physical hotplug (M5).
+  Process {
+    id: rearrangeProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseSession(text)
+        if (r.ok && r.active) root.activeSession = r.active
+        else if (r.error !== "") root.lastError = r.error
+        root.refreshMonitors()
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+  }
+
+  Timer {
+    id: rearrangeTimer
+    interval: 400
+    repeat: false
+    onTriggered: root.runRearrange()
+  }
+
+  // Elapsed-time ticker for the bar label (state only, no file polling).
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.activePhase === "casting"
+    onTriggered: root.elapsedTick = root.elapsedTick + 1
+  }
+
+  // Auto-reconnect after a network drop (opt-in).
+  Timer {
+    id: reconnectTimer
+    property var device: null
+    repeat: false
+    onTriggered: {
+      if (device && !root.sessionBusy && !root.casting)
+        root.connectDevice(device, root.connectOptions())
+    }
+  }
+
+  // Desktop notifications reuse the shell's notification server.
+  Process {
+    id: notifyProc
+    onExited: root.nextNotify()
+  }
+
   // --- display enumeration ----------------------------------------------
   Process {
     id: monitorsProc
     command: ["hyprctl", "monitors", "all", "-j"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.monitors = Model.parseMonitors(text)
+      onStreamFinished: root.applyMonitors(Model.parseMonitors(text))
     }
-  }
-
-  // Poll the unified session state while a cast is active so the panel tracks
-  // phase changes (starting -> casting -> stopped) written by the engine.
-  Timer {
-    interval: 2000
-    repeat: true
-    running: root.casting
-    onTriggered: root.refreshSession()
   }
 
   // Keep the display list fresh while the shell runs; hyprctl is cheap and
@@ -554,5 +844,62 @@ Item {
     running: true
     repeat: true
     onTriggered: root.refreshMonitors()
+  }
+
+  // --- IPC surface for keybinds and scripts (M5) ------------------------
+  IpcHandler {
+    target: "omascreencast"
+
+    function start(payloadJson: string): string {
+      try {
+        var payload = payloadJson ? JSON.parse(payloadJson) : ({})
+        var device = null
+        if (payload && (payload.uuid || payload.host)) device = payload
+        else {
+          for (var i = 0; i < root.devices.length; i++) {
+            if (root.devices[i].online !== false) { device = root.devices[i]; break }
+          }
+        }
+        if (!device) {
+          root.refreshDevices()
+          return JSON.stringify({ ok: false, error: "no Chromecast device available" })
+        }
+        var opts = root.connectOptions()
+        if (payload.res) opts.res = payload.res
+        if (payload.fps) opts.fps = payload.fps
+        if (payload.bitrate) opts.bitrate = payload.bitrate
+        if (payload.codec) opts.codec = payload.codec
+        root.connectDevice(device, opts)
+        return JSON.stringify({ ok: true, state: "connecting" })
+      } catch (e) {
+        return JSON.stringify({ ok: false, error: String(e) })
+      }
+    }
+
+    function stop(): string {
+      root.userInitiatedStop = true
+      root.disconnect()
+      return JSON.stringify({ ok: true, state: "stopping" })
+    }
+
+    function status(): string {
+      return JSON.stringify({
+        ok: true,
+        state: root.barState,
+        language: root.uiLanguage,
+        active: root.activeSession,
+        elapsed: root.castElapsedSeconds,
+        monitors: root.monitorCount,
+        devices: root.deviceCount
+      })
+    }
+
+    function refresh(): string {
+      root.refreshMonitors()
+      root.refreshDevices()
+      root.refreshDisplayRules()
+      root.refreshSession()
+      return "ok"
+    }
   }
 }

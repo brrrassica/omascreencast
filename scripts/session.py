@@ -312,6 +312,26 @@ def _tail_since(path: Path, offset: int, limit: int = 2000) -> str:
         return ""
 
 
+def _read_appended(path: Path, offset: int) -> tuple[str, int]:
+    """Read everything appended since ``offset``; reset after a log truncation."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "", max(0, int(offset))
+    start = max(0, int(offset))
+    if size < start:
+        start = 0
+    if size == start:
+        return "", start
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(start)
+            data = handle.read()
+    except OSError:
+        return "", start
+    return data.decode("utf-8", "replace"), start + len(data)
+
+
 # ---------------------------------------------------------------------------
 # hyprctl helpers
 # ---------------------------------------------------------------------------
@@ -659,6 +679,9 @@ def _create(args: argparse.Namespace) -> int:
             apply_arrangement(created_name, mode, position, args.scale)
 
         monitor = find_monitor(created_name, list_monitors()) or {}
+        # The engine's JSONL phase events go to STREAM_LOG (its stdout). Record
+        # the log position now so `events` can follow only this run's output.
+        log_offset = stream_log_offset()
         active = {
             "name": created_name,
             "ownedBy": OWNER,
@@ -676,6 +699,7 @@ def _create(args: argparse.Namespace) -> int:
             "codec": args.codec,
             "phase": "starting",
             "startedAt": _now(),
+            "logOffset": log_offset,
         }
         save({"version": STATE_VERSION, "active": active})
 
@@ -689,7 +713,6 @@ def _create(args: argparse.Namespace) -> int:
             port=args.port,
             codec=args.codec,
         )
-        log_offset = stream_log_offset()
         pid = spawn_stream(command)
         if not pid:
             raise SessionError("could not start the cast engine")
@@ -784,6 +807,113 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         return 1
 
 
+# ---------------------------------------------------------------------------
+# Live phase stream (M5) and hotplug rearrangement
+# ---------------------------------------------------------------------------
+TERMINAL_PHASES = {"idle", "error", "stopped"}
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    """Follow the engine's JSONL log and re-emit its phase events on stdout.
+
+    The QML service keeps this process alive while a cast is active. State is
+    driven by the engine's own ``type: phase`` events instead of the panel
+    polling the session file. The process exits on a terminal phase, when the
+    engine dies, or when the session is torn down.
+    """
+    interval = max(0.05, float(getattr(args, "interval", 0.25)))
+    active = load().get("active")
+    if not isinstance(active, dict) or not active:
+        _emit({"type": "phase", "phase": "idle", "detail": "no active session"})
+        return 0
+    try:
+        offset = int(active.get("logOffset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    pid = active.get("pid")
+    buffer = ""
+    while True:
+        chunk, offset = _read_appended(STREAM_LOG, offset)
+        buffer += chunk
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, dict) or message.get("type") != "phase":
+                continue
+            phase = str(message.get("phase") or "")
+            if phase == "":
+                continue
+            _emit(message)
+            if phase in TERMINAL_PHASES:
+                return 0
+
+        current = load().get("active")
+        if not isinstance(current, dict) or not current:
+            _emit({"type": "phase", "phase": "idle", "detail": "session ended"})
+            return 0
+        current_pid = current.get("pid")
+        if current_pid:
+            pid = current_pid
+        if pid and not pid_alive(pid):
+            _emit({"type": "phase", "phase": "stopped", "detail": "stream exited"})
+            return 0
+        if str(current.get("phase") or "") == "stopped" and not current.get("pid"):
+            _emit({"type": "phase", "phase": "idle", "detail": "stopped"})
+            return 0
+        time.sleep(interval)
+
+
+def rearrange_active() -> dict:
+    """Re-place the active virtual output immediately right of the primary.
+
+    Called after a physical hotplug so unplugging a monitor never strands or
+    overlaps the virtual output. The virtual output itself is never removed.
+    """
+    state = load()
+    active = state.get("active")
+    if not isinstance(active, dict) or not active:
+        return {"ok": True, "active": None, "rearranged": False}
+    name = str(active.get("name") or "")
+    monitors = list_monitors()
+    if name not in _monitor_names(monitors):
+        return {
+            "ok": False,
+            "error": f"{name or 'the virtual output'} is not present",
+            "active": active,
+            "rearranged": False,
+        }
+    others = [m for m in monitors if str(m.get("name", "")) != name]
+    position = position_right_of(primary_monitor(others))
+    mode = str(active.get("res") or PREFERRED_MODE)
+    try:
+        scale = float(active.get("scale") or 1)
+    except (TypeError, ValueError):
+        scale = 1.0
+    apply_arrangement(name, mode, position, scale)
+    updated = update_active({"position": position}) or active
+    return {
+        "ok": True,
+        "active": updated,
+        "rearranged": True,
+        "position": position,
+    }
+
+
+def cmd_rearrange(args: argparse.Namespace) -> int:
+    try:
+        _emit(rearrange_active())
+        return 0
+    except SessionError as exc:
+        _emit({"ok": False, "error": str(exc)})
+        return 1
+
+
 def find_stream_processes(output: str) -> list[int]:
     """Find our ``cast_engine.py stream --output <output>`` processes."""
     found: list[int] = []
@@ -851,6 +981,13 @@ def parse_args() -> argparse.Namespace:
 
     sub.add_parser("status", help="print the current session state")
     sub.add_parser("reconcile", help="converge state with Hyprland reality")
+    sub.add_parser("rearrange", help="place the active virtual output next to the primary display")
+
+    events = sub.add_parser(
+        "events", help="follow the active engine's JSONL phase events")
+    events.add_argument(
+        "--interval", type=float, default=0.25,
+        help="poll interval for new log lines (seconds)")
 
     create = sub.add_parser("create", help="create a virtual monitor and cast it")
     create.add_argument("--device", default="", help="receiver uuid")
@@ -881,6 +1018,8 @@ def main() -> int:
         "create": cmd_create,
         "remove": cmd_remove,
         "reconcile": cmd_reconcile,
+        "rearrange": cmd_rearrange,
+        "events": cmd_events,
         "cleanup": cmd_cleanup,
     }
     return handlers[args.command](args)

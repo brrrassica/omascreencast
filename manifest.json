@@ -30,16 +30,41 @@
       "resolution": "1920x1080@60",
       "fps": 30,
       "bitrateMbps": 6,
-      "audio": "Off"
+      "audio": "Off",
+      "language": "auto",
+      "deviceNickname": "",
+      "autoReconnect": false
     },
     "schema": [
       {
         "key": "resolution",
         "type": "enum",
         "label": "Virtual monitor resolution",
-        "options": ["1920x1080@60"],
+        "options": ["1920x1080@60", "1600x900@60", "1280x720@60"],
         "defaultValue": "1920x1080@60",
-        "description": "Hyprland headless outputs currently offer 1920x1080@60 (Spike A)."
+        "description": "Hyprland headless outputs currently offer 1920x1080@60 (Spike A); other values fall back to it."
+      },
+      {
+        "key": "language",
+        "type": "enum",
+        "label": "Language",
+        "options": ["auto", "en", "id"],
+        "defaultValue": "auto",
+        "description": "Language for status text and notifications."
+      },
+      {
+        "key": "deviceNickname",
+        "type": "string",
+        "label": "Device nickname",
+        "defaultValue": "",
+        "description": "A friendly name for the TV, shown in the panel and notifications."
+      },
+      {
+        "key": "autoReconnect",
+        "type": "boolean",
+        "label": "Auto-reconnect",
+        "defaultValue": false,
+        "description": "Retry the cast after a network drop (up to three attempts)."
       },
       {
         "key": "codec",

@@ -121,7 +121,10 @@ function parseSession(raw) {
         position: String(a.position || ""),
         scale: Number(a.scale || 1),
         phase: String(a.phase || ""),
-        pid: Number(a.pid || 0)
+        pid: Number(a.pid || 0),
+        startedAt: String(a.startedAt || ""),
+        stoppedAt: String(a.stoppedAt || ""),
+        detail: String(a.detail || "")
       }
     }
   } catch (e) {
@@ -469,4 +472,146 @@ function displayRulePayload(monitor, fields) {
     disabled: f.disabled === true,
     mirror: String(f.mirror || "")
   }
+}
+
+// ---------------------------------------------------------------------------
+// M5 — service-driven state, bar widget labels, and i18n
+// ---------------------------------------------------------------------------
+
+// Parse one JSONL line emitted by `session.py events` (the engine's phase
+// stream). Returns a safe shape so a malformed line never throws in QML.
+function parseSessionEvent(raw) {
+  var result = { type: "", phase: "", detail: "", url: "", device: "" }
+  try {
+    var msg = JSON.parse(String(raw || ""))
+    if (!msg || typeof msg !== "object") return result
+    result.type = String(msg.type || "")
+    result.phase = String(msg.phase || "")
+    result.detail = String(msg.detail || "")
+    result.url = String(msg.url || "")
+    result.device = String(msg.device || "")
+  } catch (e) {
+    console.warn("omascreencast: parseSessionEvent failed: " + e)
+  }
+  return result
+}
+
+// ISO-8601 timestamp (written by session.py) -> epoch milliseconds. Returns 0
+// for an empty/unparseable value so the caller can fall back gracefully.
+function parseTimestamp(value) {
+  var text = String(value || "").trim()
+  if (text === "") return 0
+  var parsed = Date.parse(text)
+  return isFinite(parsed) ? parsed : 0
+}
+
+// Seconds since the cast started, or 0 when the session has no timestamp.
+function sessionElapsedSeconds(session, nowMs) {
+  if (!session) return 0
+  var started = parseTimestamp(session.startedAt)
+  if (started <= 0) return 0
+  var now = Number(nowMs)
+  if (!isFinite(now) || now <= 0) now = Date.now()
+  return Math.max(0, Math.floor((now - started) / 1000))
+}
+
+// Compact elapsed label: "0:42", "12:07", "1h 02m".
+function formatElapsed(seconds) {
+  var total = Math.max(0, Math.floor(Number(seconds || 0)))
+  if (total >= 3600) {
+    var hours = Math.floor(total / 3600)
+    var minutes = Math.floor((total % 3600) / 60)
+    return hours + "h " + (minutes < 10 ? "0" : "") + minutes + "m"
+  }
+  var mins = Math.floor(total / 60)
+  var secs = total % 60
+  return mins + ":" + (secs < 10 ? "0" : "") + secs
+}
+
+// The single bar-widget state, derived from service state. Precedence is
+// deliberate: a visible error beats everything, then the session phase, then
+// an in-flight action, then discovery, and idle last.
+function barState(state) {
+  var s = state || {}
+  if (String(s.lastError || "") !== "") return "error"
+  var session = s.activeSession
+  if (session) {
+    var phase = String(session.phase || "")
+    if (phase === "casting") return "casting"
+    if (phase === "starting") return "connecting"
+  }
+  if (s.sessionBusy === true) return "connecting"
+  if (s.discovering === true) return "discovering"
+  return "idle"
+}
+
+// The device to reconnect to, reconstructed from the recorded session. Used by
+// the auto-reconnect path after a network drop when discovery may be empty.
+function reconnectDeviceFromSession(session) {
+  if (!session) return null
+  var uuid = String(session.deviceUuid || "")
+  var host = String(session.deviceHost || "")
+  if (uuid === "" && host === "") return null
+  return {
+    uuid: uuid,
+    host: host,
+    name: String(session.deviceName || host || uuid),
+    port: Number(session.port || 8009),
+    model: "",
+    online: true,
+    codecs: []
+  }
+}
+
+var _TRANSLATIONS = {
+  en: {
+    searching: "Searching…",
+    idle: "Idle",
+    connecting: "Connecting…",
+    casting: "Casting",
+    casting_to: "Casting to",
+    disconnecting: "Disconnecting…",
+    connected: "Connected to",
+    disconnected: "Disconnected",
+    session_ended: "Cast ended",
+    cast_failed: "Cast failed",
+    auto_reconnect: "Reconnecting to",
+    use_tv: "Use TV as monitor",
+    disconnect: "Disconnect",
+    confirm_disconnect: "Disconnect and remove the virtual monitor?",
+    no_devices: "No Chromecast devices found.",
+    setup_required: "Missing Python dependencies.",
+    displays: "displays",
+    devices: "devices"
+  },
+  id: {
+    searching: "Mencari…",
+    idle: "Menganggur",
+    connecting: "Menghubungkan…",
+    casting: "Menyiarkan",
+    casting_to: "Menyiarkan ke",
+    disconnecting: "Memutuskan…",
+    connected: "Terhubung ke",
+    disconnected: "Terputus",
+    session_ended: "Siaran berakhir",
+    cast_failed: "Siaran gagal",
+    auto_reconnect: "Menghubungkan ulang ke",
+    use_tv: "Pakai TV sebagai monitor",
+    disconnect: "Putuskan",
+    confirm_disconnect: "Putuskan dan hapus monitor virtual?",
+    no_devices: "Tidak ada perangkat Chromecast ditemukan.",
+    setup_required: "Dependensi Python belum lengkap.",
+    displays: "layar",
+    devices: "perangkat"
+  }
+}
+
+// Translate a UI key. Unknown keys fall through unchanged so a missing string
+// is visible in development instead of silently blank.
+function tr(lang, key) {
+  var code = String(lang || "en")
+  if (code === "auto") code = "en"
+  var table = _TRANSLATIONS[code] || _TRANSLATIONS.en
+  var value = table[String(key || "")]
+  return value !== undefined ? value : String(key || "")
 }

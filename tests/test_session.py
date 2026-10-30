@@ -352,6 +352,76 @@ class CreateLifecycleTest(_TempPaths):
         self.assertIn("already active", payload["error"])
 
 
+class EventsTest(_TempPaths):
+    def test_events_emits_only_new_lines_and_stops_on_terminal_phase(self):
+        self.session.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        prefix = '{"type":"phase","phase":"starting"}\n'
+        rest = (
+            '{"type":"phase","phase":"casting","url":"http://x/s.m3u8"}\n'
+            '{"type":"phase","phase":"idle","detail":"stopped"}\n'
+        )
+        self.session.STREAM_LOG.write_text(prefix + rest, encoding="utf-8")
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "pid": 123, "phase": "casting",
+            "logOffset": len(prefix),
+        }})
+        self.session.pid_alive = lambda pid: True
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.session.cmd_events(argparse.Namespace(interval=0.01))
+        messages = [json.loads(line) for line in out.getvalue().splitlines() if line]
+        self.assertEqual([m["phase"] for m in messages], ["casting", "idle"])
+        self.assertEqual(messages[0]["url"], "http://x/s.m3u8")
+
+    def test_events_without_session_exits_idle(self):
+        payload = self.emit_command(
+            self.session.cmd_events, argparse.Namespace(interval=0.01))
+        self.assertEqual(payload["phase"], "idle")
+
+    def test_events_reports_dead_stream(self):
+        self.session.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.session.STREAM_LOG.write_text("", encoding="utf-8")
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "pid": 999, "phase": "starting", "logOffset": 0,
+        }})
+        self.session.pid_alive = lambda pid: False
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.session.cmd_events(argparse.Namespace(interval=0.01))
+        messages = [json.loads(line) for line in out.getvalue().splitlines() if line]
+        self.assertEqual(messages[-1]["phase"], "stopped")
+
+
+class RearrangeTest(_TempPaths):
+    def test_rearrange_places_virtual_right_of_primary(self):
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "res": "1920x1080@60", "scale": 1,
+            "position": "0x0", "phase": "casting",
+        }})
+        self.session.list_monitors = lambda: [
+            {"name": "eDP-1", "focused": True, "x": 0, "y": 0,
+             "width": 1920, "height": 1080, "scale": 1},
+            {"name": "HEADLESS-1", "x": 0, "y": 0, "width": 1920, "height": 1080},
+        ]
+        applied = []
+        self.session.apply_arrangement = (
+            lambda name, mode, position, scale: applied.append((name, mode, position, scale)))
+        result = self.session.rearrange_active()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["rearranged"])
+        self.assertEqual(applied[0], ("HEADLESS-1", "1920x1080@60", "1920x0", 1.0))
+        self.assertEqual(self.session.load()["active"]["position"], "1920x0")
+
+    def test_rearrange_reports_missing_output(self):
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "res": "1920x1080@60", "phase": "casting",
+        }})
+        self.session.list_monitors = lambda: [{"name": "eDP-1"}]
+        result = self.session.rearrange_active()
+        self.assertFalse(result["ok"])
+        self.assertIn("HEADLESS-1", result["error"])
+
+
 class RemoveTest(_TempPaths):
     def test_remove_is_idempotent(self):
         payload = self.emit_command(self.session.cmd_remove, argparse.Namespace())
