@@ -29,6 +29,11 @@ REQUIRED_BIN = ("hyprctl", "wf-recorder", "ffmpeg")
 STATE_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "omascreencast"
 VENV_DIR = STATE_DIR / "venv"
 
+# The local stream port the receiver must be able to reach (R2c). `doctor`
+# surfaces the exact firewall rule; it is never applied automatically.
+DEFAULT_PORT = 7236
+FAST_PATH = "pacman -S python-pychromecast python-zeroconf wf-recorder ffmpeg"
+
 
 def _has_module(name: str) -> bool:
     try:
@@ -77,11 +82,62 @@ def provision() -> dict:
     return status
 
 
+def _venv_python() -> Path:
+    return VENV_DIR / "bin" / "python"
+
+
+def _venv_has_modules(python: Path) -> bool:
+    """True when the private venv can import every required Python module."""
+    if not python.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [str(python), "-c", "import " + ", ".join(REQUIRED_PY)],
+            capture_output=True, timeout=30,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def doctor() -> dict:
+    """Full dependency report for the panel's Doctor UI (R4, R9).
+
+    Reports what is missing, which interpreter the engine should use (system
+    python, or the private venv when it already has the modules), the exact
+    firewall rule for the stream port, and the repo-install fast path. It never
+    installs anything and never invokes sudo.
+    """
+    missing_bin = [b for b in REQUIRED_BIN if not _which(b)]
+    missing_py = [m for m in REQUIRED_PY if not _has_module(m)]
+    venv_python = _venv_python()
+    venv_ready = _venv_has_modules(venv_python)
+    python = str(venv_python) if (missing_py and venv_ready) else sys.executable
+    ok = not missing_bin and (not missing_py or venv_ready)
+    return {
+        "ok": ok,
+        "missingBinaries": missing_bin,
+        "missingPython": missing_py,
+        "venv": str(VENV_DIR),
+        "venvExists": VENV_DIR.exists(),
+        "venvReady": venv_ready,
+        "python": python,
+        "streamPort": DEFAULT_PORT,
+        "fastPath": FAST_PATH,
+        "firewallRule": f"sudo ufw allow {DEFAULT_PORT}/tcp",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "provision"), help="what to do")
+    parser.add_argument("command", choices=("check", "provision", "doctor"), help="what to do")
     args = parser.parse_args()
-    result = check() if args.command == "check" else provision()
+    if args.command == "doctor":
+        result = doctor()
+    elif args.command == "check":
+        result = check()
+    else:
+        result = provision()
     print(json.dumps(result, separators=(",", ":")))
     return 0 if result.get("ok") or args.command == "provision" else 1
 

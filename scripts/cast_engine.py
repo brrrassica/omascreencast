@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import http.server
+import ipaddress
 import json
 import logging
 import os
@@ -38,6 +39,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -445,12 +448,412 @@ def _teardown(cap, ff, srv, mc, run_dir: Path, log: logging.Logger) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Device discovery (mDNS via zeroconf, avahi-browse fallback, manual host)
+#
+# The receiver is found over mDNS (`_googlecast._tcp`). We deliberately avoid
+# pychromecast's blocking `get_chromecasts(timeout=10)` per call: `--watch`
+# keeps a single long-lived zeroconf browser alive and streams incremental
+# snapshots as JSONL, so the panel updates without a 10 s stall (M1, [perf]).
+# `avahi-browse -rtp` is the fallback when zeroconf is unavailable, and a
+# manually typed IP is the last resort for mDNS-blocked / cross-VLAN receivers
+# (R6). Per-device codec capabilities are probed once and cached so the engine
+# can negotiate without re-querying (feeds M3, R3).
+# ---------------------------------------------------------------------------
+SERVICE_TYPE = "_googlecast._tcp.local."
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "omascreencast"
+DEVICE_CACHE = STATE_DIR / "devices.json"
+DEFAULT_DISCOVERY_TIMEOUT = 3.0
+EUREKA_TIMEOUT = 1.5
+DEFAULT_CODECS = ["h264"]  # R3: safe default when the receiver is unknown
+CODEC_ORDER = ["hevc", "h264", "vp9", "av1"]
+
+
+@dataclass
+class Device:
+    """A discovered (or manually entered) Chromecast receiver."""
+
+    uuid: str = ""
+    name: str = ""
+    host: str = ""
+    port: int = 8009
+    model: str = ""
+    online: bool = True
+    codecs: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {
+            "uuid": self.uuid,
+            "name": self.name,
+            "host": self.host,
+            "port": self.port,
+            "model": self.model,
+            "online": self.online,
+            "codecs": list(self.codecs),
+        }
+
+
+def _clean_name(name: str, service_type: str = SERVICE_TYPE) -> str:
+    """Strip the mDNS service suffix from a discovered instance name."""
+    suffix = "." + service_type
+    if name.endswith(suffix):
+        name = name[: -len(suffix)]
+    return name.strip().rstrip(".")
+
+
+def _first_ipv4(addresses) -> str:
+    """The receiver announces IPv4 and IPv6; the pipeline speaks IPv4."""
+    for raw in addresses or []:
+        try:
+            addr = ipaddress.ip_address(str(raw))
+        except ValueError:
+            continue
+        if addr.version == 4:
+            return str(addr)
+    return ""
+
+
+def parse_txt(txt: str) -> dict:
+    """Parse a DNS-SD TXT record into a dict.
+
+    Handles both the zeroconf form (NUL-separated ``k=v``) and the avahi ``-p``
+    form (each pair wrapped in double quotes).
+    """
+    props: dict[str, str] = {}
+    text = str(txt or "").strip()
+    if '"' in text:
+        parts = [p for p in text.split('"') if p.strip()]
+    else:
+        parts = text.split("\x00")
+    for chunk in parts:
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        key, _, value = chunk.partition("=")
+        props[key.strip()] = value.strip()
+    return props
+
+
+def _decode_props(properties) -> dict:
+    """Decode a zeroconf ``ServiceInfo.properties`` mapping to str->str."""
+    props: dict[str, str] = {}
+    for key, value in (properties or {}).items():
+        k = key.decode("utf-8", "replace") if isinstance(key, bytes) else str(key)
+        v = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+        props[k] = v
+    return props
+
+
+def codecs_from_eureka(info: dict) -> list[str]:
+    """Best-effort codec list from a Cast ``eureka_info`` payload.
+
+    The receiver does not advertise codecs in a stable, documented field, so we
+    look at the few places they have been observed and fall back to the safe
+    H.264 default (R3) when nothing usable is found.
+    """
+    if not isinstance(info, dict):
+        return list(DEFAULT_CODECS)
+    detail = info.get("detail") if isinstance(info.get("detail"), dict) else info
+    raw = None
+    for key in ("supported_codecs", "codecs", "video_codecs"):
+        if isinstance(detail.get(key), list):
+            raw = detail[key]
+            break
+    if raw is None:
+        return list(DEFAULT_CODECS)
+    found: set[str] = set()
+    for item in raw:
+        name = str(item).lower()
+        if "hevc" in name or "h265" in name or "h.265" in name:
+            found.add("hevc")
+        elif "h264" in name or "avc" in name or "h.264" in name:
+            found.add("h264")
+        elif "vp9" in name:
+            found.add("vp9")
+        elif "av1" in name:
+            found.add("av1")
+    ordered = [c for c in CODEC_ORDER if c in found]
+    return ordered or list(DEFAULT_CODECS)
+
+
+def parse_avahi(output: str) -> list[Device]:
+    """Parse ``avahi-browse -rtp _googlecast._tcp`` output into devices.
+
+    Resolved lines look like::
+
+        =;wlan0;IPv4;Living Room;_googlecast._tcp;local;tv.local;192.168.1.5;8009;"id=...","md=Chromecast","fn=Living Room"
+    """
+    devices: dict[str, Device] = {}
+    for line in str(output or "").splitlines():
+        if not line.startswith("="):
+            continue
+        fields = line.split(";")
+        if len(fields) < 10:
+            continue
+        name = fields[3]
+        address = fields[7]
+        try:
+            port = int(fields[8])
+        except ValueError:
+            port = 8009
+        props = parse_txt(fields[9])
+        host = _first_ipv4([address]) or address.strip()
+        if not host:
+            continue
+        uuid = props.get("id", "")
+        key = uuid or host
+        devices[key] = Device(
+            uuid=uuid,
+            name=props.get("fn") or _clean_name(name),
+            host=host,
+            port=port,
+            model=props.get("md", ""),
+            online=True,
+            codecs=list(DEFAULT_CODECS),
+        )
+    return sorted(devices.values(), key=lambda d: (d.name.lower(), d.host))
+
+
+def manual_device(host: str, name: str = "") -> Device:
+    """Build a device from a manually typed IP (mDNS-blocked fallback, R6)."""
+    host = str(host or "").strip()
+    return Device(
+        uuid="",
+        name=name or host,
+        host=host,
+        port=8009,
+        model="",
+        online=True,
+        codecs=list(DEFAULT_CODECS),
+    )
+
+
+def _load_cache() -> dict:
+    if not DEVICE_CACHE.exists():
+        return {}
+    try:
+        data = json.loads(DEVICE_CACHE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_cache(cache: dict) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = DEVICE_CACHE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cache, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(DEVICE_CACHE)
+    except OSError:
+        pass
+
+
+def _apply_cached_codecs(devices: list[Device], cache: dict) -> None:
+    for dev in devices:
+        cached = cache.get(dev.uuid or dev.host)
+        if isinstance(cached, dict) and isinstance(cached.get("codecs"), list) and cached["codecs"]:
+            dev.codecs = list(cached["codecs"])
+
+
+def probe_codecs(host: str, timeout: float = EUREKA_TIMEOUT) -> list[str]:
+    """Best-effort codec probe via the Cast ``eureka_info`` endpoint (R3)."""
+    url = f"http://{host}:8008/setup/eureka_info?options=detail"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            info = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - a network probe must never be fatal
+        return list(DEFAULT_CODECS)
+    return codecs_from_eureka(info)
+
+
+def _zeroconf_discover(timeout: float, log: logging.Logger) -> list[Device]:
+    """One-shot mDNS browse; returns whatever resolved within ``timeout``."""
+    try:
+        from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+    except ImportError as exc:
+        log.warning("zeroconf unavailable: %s", exc)
+        return []
+
+    found: dict[str, Device] = {}
+
+    class _Listener(ServiceListener):
+        def _resolve(self, zc, type_, name):
+            info = zc.get_service_info(type_, name, timeout=int(timeout * 1000))
+            if info is None:
+                return
+            props = _decode_props(info.properties)
+            host = _first_ipv4(info.parsed_addresses())
+            if not host:
+                return
+            uuid = props.get("id", "")
+            found[uuid or host] = Device(
+                uuid=uuid,
+                name=props.get("fn") or _clean_name(name),
+                host=host,
+                port=info.port or 8009,
+                model=props.get("md", ""),
+                online=True,
+                codecs=list(DEFAULT_CODECS),
+            )
+
+        def add_service(self, zc, type_, name):  # noqa: N802
+            self._resolve(zc, type_, name)
+
+        def update_service(self, zc, type_, name):  # noqa: N802
+            self._resolve(zc, type_, name)
+
+        def remove_service(self, zc, type_, name):  # noqa: N802
+            pass
+
+    zc = Zeroconf()
+    browser = ServiceBrowser(zc, SERVICE_TYPE, _Listener())
+    try:
+        time.sleep(timeout)
+    finally:
+        browser.cancel()
+        zc.close()
+    return sorted(found.values(), key=lambda d: (d.name.lower(), d.host))
+
+
+def _avahi_discover(log: logging.Logger) -> list[Device]:
+    """Fallback discovery via ``avahi-browse`` when zeroconf is unavailable."""
+    if shutil.which("avahi-browse") is None:
+        return []
+    try:
+        result = subprocess.run(
+            ["avahi-browse", "-rtp", SERVICE_TYPE],
+            capture_output=True, text=True, timeout=6,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("avahi-browse failed: %s", exc)
+        return []
+    return parse_avahi(result.stdout)
+
+
+def discover_once(timeout: float, log: logging.Logger, host: str = "") -> list[Device]:
+    """Resolve the current device list, probing + caching codecs once per device."""
+    if host:
+        return [manual_device(host)]
+    devices = _zeroconf_discover(timeout, log)
+    if not devices:
+        log.info("zeroconf found nothing; trying avahi-browse fallback")
+        devices = _avahi_discover(log)
+    cache = _load_cache()
+    _apply_cached_codecs(devices, cache)
+    changed = False
+    for dev in devices:
+        key = dev.uuid or dev.host
+        if key not in cache:
+            dev.codecs = probe_codecs(dev.host)
+            cache[key] = {"name": dev.name, "model": dev.model, "codecs": dev.codecs}
+            changed = True
+    if changed:
+        _save_cache(cache)
+    return devices
+
+
+def _watch(args: argparse.Namespace, log: logging.Logger) -> int:
+    """Long-lived zeroconf browser streaming incremental snapshots as JSONL."""
+    if args.host:
+        emit({"type": "discovery", "devices": [manual_device(args.host).as_dict()]})
+        emit({"type": "phase", "phase": "idle", "detail": "manual host"})
+        return 0
+
+    try:
+        from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+    except ImportError as exc:
+        log.error("zeroconf unavailable: %s", exc)
+        emit({"type": "phase", "phase": "error", "detail": f"zeroconf not available: {exc}"})
+        return 1
+
+    found: dict[str, Device] = {}
+    lock = threading.Lock()
+    cache = _load_cache()
+
+    def publish() -> None:
+        with lock:
+            devices = sorted(found.values(), key=lambda d: (d.name.lower(), d.host))
+        emit({"type": "discovery", "devices": [d.as_dict() for d in devices]})
+
+    class _Listener(ServiceListener):
+        def _resolve(self, zc, type_, name):
+            info = zc.get_service_info(type_, name, timeout=2000)
+            if info is None:
+                return
+            props = _decode_props(info.properties)
+            host = _first_ipv4(info.parsed_addresses())
+            if not host:
+                return
+            uuid = props.get("id", "")
+            key = uuid or host
+            dev = Device(
+                uuid=uuid,
+                name=props.get("fn") or _clean_name(name),
+                host=host,
+                port=info.port or 8009,
+                model=props.get("md", ""),
+                online=True,
+                codecs=list(DEFAULT_CODECS),
+            )
+            cached = cache.get(key)
+            if isinstance(cached, dict) and cached.get("codecs"):
+                dev.codecs = list(cached["codecs"])
+            else:
+                dev.codecs = probe_codecs(dev.host)
+                cache[key] = {"name": dev.name, "model": dev.model, "codecs": dev.codecs}
+                _save_cache(cache)
+            with lock:
+                found[key] = dev
+            publish()
+
+        def add_service(self, zc, type_, name):  # noqa: N802
+            self._resolve(zc, type_, name)
+
+        def update_service(self, zc, type_, name):  # noqa: N802
+            self._resolve(zc, type_, name)
+
+        def remove_service(self, zc, type_, name):  # noqa: N802
+            clean = _clean_name(name)
+            with lock:
+                for dev in found.values():
+                    if dev.name == clean:
+                        dev.online = False
+            publish()
+
+    zc = Zeroconf()
+    browser = ServiceBrowser(zc, SERVICE_TYPE, _Listener())
+    emit({"type": "phase", "phase": "discovering", "detail": "browsing mDNS"})
+    publish()  # initial (possibly empty) snapshot so the panel leaves the spinner
+
+    stop = threading.Event()
+
+    def _on_signal(signum, _frame):
+        log.info("discovery signal %s received", signum)
+        stop.set()
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+    try:
+        while not stop.is_set():
+            time.sleep(0.5)
+    finally:
+        browser.cancel()
+        zc.close()
+    emit({"type": "phase", "phase": "idle", "detail": "discovery stopped"})
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 def cmd_discovery(args: argparse.Namespace) -> int:
-    # TODO(M1): pychromecast/zeroconf discovery, avahi-browse fallback,
-    # manual host entry. Shape: [{uuid,name,host,port,model,online,codecs}].
-    emit({"ok": True, "type": "discovery", "devices": []})
+    log = setup_logging(args.debug)
+    if args.host:
+        emit({"type": "discovery", "devices": [manual_device(args.host).as_dict()]})
+        return 0
+    if args.watch:
+        return _watch(args, log)
+    devices = discover_once(args.timeout, log)
+    emit({"type": "discovery", "devices": [d.as_dict() for d in devices]})
     return 0
 
 
@@ -636,7 +1039,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("discovery", help="discover Chromecast devices")
+    disc = sub.add_parser("discovery", help="discover Chromecast devices")
+    disc.add_argument("--timeout", type=float, default=DEFAULT_DISCOVERY_TIMEOUT,
+                      help="seconds to browse mDNS in one-shot mode")
+    disc.add_argument("--watch", action="store_true",
+                      help="keep a long-lived browser and stream incremental JSONL snapshots")
+    disc.add_argument("--host", default="", help="manual receiver IP (skips mDNS, R6)")
+    disc.add_argument("--debug", action="store_true", help="verbose logging")
 
     stream = sub.add_parser("stream", help="capture a virtual output and cast it")
     stream.add_argument("--device", default="", help="receiver uuid")

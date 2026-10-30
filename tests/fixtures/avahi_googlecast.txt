@@ -1,0 +1,4 @@
++;wlan0;IPv4;BRAVIA VU2;_googlecast._tcp;local
++;wlan0;IPv4;PANASONIC TV;_googlecast._tcp;local
+=;wlan0;IPv4;BRAVIA VU2;_googlecast._tcp;local;BRAVIA-VU2.local;192.168.100.80;8009;"id=d76350b215881b463b6cf307697864a6" "md=BRAVIA VU2" "fn=BRAVIA VU2"
+=;wlan0;IPv4;PANASONIC TV;_googlecast._tcp;local;panasonic.local;192.168.100.60;8009;"id=9652f678081b9657ba6cf152947e9608" "md=PANASONIC TV" "fn=PANASONIC TV"

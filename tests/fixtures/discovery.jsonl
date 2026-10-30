@@ -1,0 +1,4 @@
+{"type":"phase","phase":"discovering","detail":"browsing mDNS"}
+{"type":"discovery","devices":[{"uuid":"d76350b215881b463b6cf307697864a6","name":"BRAVIA VU2","host":"192.168.100.80","port":8009,"model":"BRAVIA VU2","online":true,"codecs":["h264"]}]}
+{"type":"discovery","devices":[{"uuid":"d76350b215881b463b6cf307697864a6","name":"BRAVIA VU2","host":"192.168.100.80","port":8009,"model":"BRAVIA VU2","online":true,"codecs":["h264"]},{"uuid":"9652f678081b9657ba6cf152947e9608","name":"PANASONIC TV","host":"192.168.100.60","port":8009,"model":"PANASONIC TV","online":true,"codecs":["h264"]}]}
+{"type":"phase","phase":"idle","detail":"discovery stopped"}
