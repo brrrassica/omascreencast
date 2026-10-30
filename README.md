@@ -7,12 +7,14 @@ Unlike screen *mirroring*, omascreencast creates a Hyprland **headless virtual o
 desktop onto it, and streams *that output* to the TV. The TV becomes a real second display you can place,
 resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 
-> **Status:** pre-alpha (v0.1.0 in progress). Discovery, the virtual-monitor session (create /
-> remove / reconcile), the capture → encode → LL-HLS → Chromecast pipeline, and the monitor
-> arranger (drag, snap, mode/scale/rotation/disable/mirror, persist) are wired, including a
-> rootless “Set up” dependency action, crash-out reconciliation, guarded layouts, trial/keep/
-> revert arrangement changes, receiver-drop handling, and idempotent teardown. Remaining work is
-> hardware verification and packaging. See `plans/milestones.md`.
+![Omascreencast panel: eDP-1 and a virtual HEADLESS-1 output arranged side by side, with a Sony Bravia casting and a Panasonic TV available](preview.png)
+
+> **Status:** v0.1.0. Discovery, the virtual-monitor session (create / remove / reconcile), the
+> capture → encode → LL-HLS → Chromecast pipeline, and the monitor arranger (drag, snap,
+> mode/scale/rotation/disable/mirror, persist) are implemented, including a rootless “Set up”
+> dependency action, crash-out reconciliation, guarded layouts, trial/keep/revert arrangement
+> changes, receiver-drop handling, and idempotent teardown. End-to-end verification against the
+> author's receivers is ongoing; see [CHANGELOG.md](CHANGELOG.md#known-gaps) for the exact gaps.
 
 ## What it does
 
@@ -52,6 +54,11 @@ Dependencies are resolved **without root**: the plugin prefers system-installed
 `~/.local/share/omascreencast/venv` on first use (the panel’s Doctor section exposes a
 **Set up** action for this).
 
+**Privilege statement:** omascreencast never runs `sudo`, `pkexec`, or `pacman`, never installs
+a systemd unit, and never changes your firewall. The one optional `ufw` rule below is yours to
+apply (or skip, if the port is already reachable). Full details, exact package names, and the
+runtime state paths are in [`docs/dependencies.md`](docs/dependencies.md).
+
 Optional, faster path (one-time, requires root):
 
 ```sh
@@ -74,6 +81,21 @@ For local development against this checkout:
 omarchy plugin add file://$HOME/projects/omascreencast --enable --yes
 ```
 
+## Quick start
+
+1. **Install and enable** the plugin (above).
+2. Open the panel from the bar's **Omascreencast** widget and check **Doctor**. If Python
+   packages are missing, press **Set up** (private venv, no root) or use the optional Arch
+   package command above.
+3. **Allow the stream port once** if your firewall is enabled: `sudo ufw allow 7236/tcp`.
+   Doctor shows the exact rule for the resolved port; the plugin never changes it.
+4. Pick your Chromecast under **Chromecast devices**, then press **Use TV as monitor**. A
+   `HEADLESS-*` output appears in Hyprland, is placed to the right of the primary display,
+   and the TV shows that desktop within a few seconds.
+5. In **Displays & devices**, drag the virtual output next to a physical one so the cursor can
+   reach it, then press **Keep** before the trial timeout. **Disconnect** removes the output
+   and stops the stream cleanly.
+
 ## Develop
 
 ```sh
@@ -86,6 +108,9 @@ omarchy-shell shell rescanPlugins
 
 # python unit tests
 python3 -m unittest discover -s tests -v
+
+# everything CI runs: manifest, unit tests, headless pipeline smoke, validate, qmllint
+./scripts/smoke.sh
 ```
 
 Logs and opt-in debug dumps are written to `~/.local/state/omascreencast/`
@@ -138,6 +163,29 @@ casting: **keep** the virtual monitor (default; the panel shows a Reconnect acti
 **remove** it. With auto-reconnect enabled, the old output is torn down and a new session is
 retried automatically.
 
+## Troubleshooting
+
+- **No Chromecast listed.** mDNS may be blocked or the TV may be on another VLAN/guest network.
+  Use the panel's **Add by IP** manual entry, confirm both devices are on the same subnet, and
+  check that `avahi`/mDNS is not filtered. `python3 scripts/cast_engine.py discovery` prints
+  what discovery actually sees.
+- **TV shows a black screen or keeps loading.** The receiver must be able to fetch the stream:
+  verify the firewall rule for port 7236 (`sudo ufw status`), that the TV can reach your LAN IP,
+  and that the stream server bound to that interface. Try `codec = h264` if the TV rejects HEVC.
+  Details are in `~/.local/state/omascreencast/cast_engine.log`.
+- **The cursor cannot enter the TV.** Hyprland clamps the pointer at the edge of the outermost
+  output. Place the virtual output **adjacent** to a physical one (the arranger snaps it there),
+  not in a detached position.
+- **Latency is higher than expected.** ~2 s is the measured floor; the receiver's buffer
+  dominates. Prefer `wf-recorder` (pinned short GOP), keep the bitrate moderate, and avoid
+  software VP9. Sub-second latency is not a goal of v0.1.0.
+- **A layout change reverted itself.** Arrangement changes are trials. Press **Keep** before the
+  countdown ends, or reapply the change.
+- **"Set up" failed.** The private venv needs network access to install packages. Either retry
+  when online or install the optional Arch packages (they take precedence).
+- **Something feels stuck.** Run `python3 scripts/session.py status`, then
+  `python3 scripts/session.py reconcile`. Both are safe and idempotent.
+
 ## Repository layout
 
 ```
@@ -145,12 +193,22 @@ manifest.json          # Omarchy plugin manifest (id: tech.alatcerdas.omascreenc
 Panel.qml              # bar-widget entry point + popup host (arranger + cast UI)
 Service.qml            # headless service singleton: session state, discovery, recovery
 Model.js               # pure JSON -> view-model helpers
+preview.png / .svg     # marketplace/website screenshot (illustrative mockup)
 scripts/
   bootstrap.py         # rootless dependency resolution (system pkgs -> private venv)
   cast_engine.py       # discovery + capture -> encode -> serve -> Chromecast (in-memory LL-HLS)
   display_config.py    # literal-only reader/writer for ~/.config/hypr/monitors.lua (arranger)
   session.py           # session-state tracking + orphan reconciliation
-tests/                 # unittest suite + captured fixtures
+  lint.sh              # qmllint against the Quickshell `qs.*` modules
+  smoke.sh             # release smoke: manifest, tests, headless pipeline, validate, lint
+tests/                 # unittest suite, headless smoke, captured fixtures
+docs/dependencies.md   # exact packages, provisioning, firewall, runtime state
+docs/marketplace.md    # listing copy, tags/aliases, security baseline checklist
+website/               # static content for omascreencast.alatcerdas.tech
+.github/workflows/     # CI: Python tests + headless pipeline smoke
+CHANGELOG.md           # release notes (v0.1.0)
+SECURITY.md            # privilege model, stream exposure, private reporting
+THIRD_PARTY_NOTICES.md # licenses of runtime dependencies
 plans/                 # local-only roadmap (gitignored)
 ```
 
@@ -176,4 +234,6 @@ manually if desired.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Runtime dependencies keep their own licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Security model and reporting:
+[SECURITY.md](SECURITY.md).

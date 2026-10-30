@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Omascreencast — your TV as a second monitor</title>
+  <meta name="description" content="An Omarchy Quattro plugin that turns a Chromecast TV into an arrangeable virtual second monitor, plus a monitor arranger for every display.">
+  <meta property="og:title" content="Omascreencast">
+  <meta property="og:description" content="Use a Chromecast TV as a real, arrangeable second display on Hyprland. Userspace only.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://omascreencast.alatcerdas.tech">
+  <meta property="og:image" content="https://omascreencast.alatcerdas.tech/preview.png">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23161a24'/%3E%3Crect x='6' y='9' width='20' height='13' rx='2' fill='none' stroke='%238ab4ff' stroke-width='2'/%3E%3Cpath d='M11 27h10M16 22v5' stroke='%238ab4ff' stroke-width='2'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #0e1016;
+      --panel: #171b24;
+      --panel-2: #1d2230;
+      --line: #2a3142;
+      --text: #eef3fb;
+      --muted: #93a0b8;
+      --accent: #8ab4ff;
+      --accent-2: #5b8cff;
+      --green: #6ee7a8;
+      --amber: #ffcf6e;
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 80% -10%, #1b2747 0%, transparent 60%),
+                  radial-gradient(900px 500px at 0% 100%, #142033 0%, transparent 55%),
+                  var(--bg);
+      color: var(--text);
+      font: 16px/1.6 system-ui, -apple-system, "Segoe UI", "DejaVu Sans", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 22px 0; border-bottom: 1px solid var(--line);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: .2px; }
+    .brand svg { width: 28px; height: 28px; }
+    nav { display: flex; gap: 22px; font-size: 14px; }
+    nav a { color: var(--muted); }
+    nav a:hover { color: var(--text); text-decoration: none; }
+    .hero { display: grid; grid-template-columns: 1.05fr .95fr; gap: 48px; align-items: center; padding: 72px 0 40px; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px;
+      background: rgba(23,27,36,.7); color: var(--muted); font-size: 13px;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    h1 { font-size: clamp(34px, 5vw, 56px); line-height: 1.08; margin: 20px 0 18px; letter-spacing: -.02em; }
+    h1 span { background: linear-gradient(100deg, #cfe0ff, var(--accent)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .lede { color: var(--muted); font-size: 18px; max-width: 54ch; }
+    .cta { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 30px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 9px;
+      padding: 13px 22px; border-radius: 11px; font-weight: 600; font-size: 15px;
+      border: 1px solid transparent;
+    }
+    .btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #0b1322; }
+    .btn.primary:hover { text-decoration: none; filter: brightness(1.06); }
+    .btn.ghost { border-color: var(--line); color: var(--text); background: var(--panel); }
+    .btn.ghost:hover { text-decoration: none; background: var(--panel-2); }
+    .btn code { font-size: 13px; }
+    .shot {
+      border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden;
+      box-shadow: 0 28px 70px rgba(0,0,0,.5); background: var(--panel);
+    }
+    .shot img { display: block; width: 100%; height: auto; }
+    section { padding: 58px 0; border-top: 1px solid var(--line); }
+    h2 { font-size: 28px; margin: 0 0 8px; letter-spacing: -.01em; }
+    .sub { color: var(--muted); margin: 0 0 28px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+    .card {
+      background: linear-gradient(180deg, var(--panel), rgba(23,27,36,.6));
+      border: 1px solid var(--line); border-radius: var(--radius); padding: 22px;
+    }
+    .card h3 { margin: 0 0 8px; font-size: 17px; }
+    .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+    .icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: #202a42; color: var(--accent); margin-bottom: 14px; }
+    .limits { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .limits ul { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+    .limits li { margin: 7px 0; }
+    pre {
+      background: #0b0e14; border: 1px solid var(--line); border-radius: 12px;
+      padding: 16px 18px; overflow: auto; font-size: 13.5px;
+      font-family: "DejaVu Sans Mono", ui-monospace, monospace; color: #c9d4e6;
+    }
+    pre .c { color: #6b7a94; }
+    .steps { counter-reset: step; display: grid; gap: 14px; }
+    .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+    .step::before {
+      counter-increment: step; content: counter(step);
+      width: 30px; height: 30px; border-radius: 50%;
+      display: grid; place-items: center; font-size: 13px; font-weight: 700;
+      background: #202a42; color: var(--accent);
+    }
+    .step h3 { margin: 2px 0 4px; font-size: 16px; }
+    .step p { margin: 0; color: var(--muted); font-size: 14.5px; }
+    footer { border-top: 1px solid var(--line); padding: 30px 0 46px; color: var(--muted); font-size: 14px; }
+    footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; padding-top: 48px; }
+      .grid { grid-template-columns: 1fr; }
+      .limits { grid-template-columns: 1fr; }
+      nav { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#1d2740"/><rect x="6" y="9" width="20" height="13" rx="2" fill="none" stroke="#8ab4ff" stroke-width="2"/><path d="M11 27h10M16 22v5" stroke="#8ab4ff" stroke-width="2"/></svg>
+        Omascreencast
+      </div>
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#install">Install</a>
+        <a href="#limits">Limitations</a>
+        <a href="https://github.com/alatcerdas/omascreencast">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <div class="hero">
+        <div>
+          <span class="pill"><span class="dot"></span> v0.1.0 · Omarchy Quattro</span>
+          <h1>Use your TV as a <span>second monitor.</span></h1>
+          <p class="lede">
+            Omascreencast creates a real Hyprland headless output, extends your desktop onto it,
+            and streams that display to a Chromecast TV over the LAN. Arrange it like any other
+            monitor — because that is exactly what it is.
+          </p>
+          <div class="cta">
+            <a class="btn primary" href="#install">Install</a>
+            <a class="btn ghost" href="https://github.com/alatcerdas/omascreencast"><code>omarchy plugin add …</code></a>
+          </div>
+        </div>
+        <div class="shot">
+          <img src="preview.png" width="1200" height="675" alt="The Omascreencast panel showing eDP-1 and a virtual HEADLESS output, a Sony Bravia casting, and a Panasonic TV available.">
+        </div>
+      </div>
+
+      <section id="features">
+        <h2>Not a mirror. A display.</h2>
+        <p class="sub">The TV becomes a genuine output you can place, resize, rotate, mirror, or disable.</p>
+        <div class="grid">
+          <div class="card">
+            <div class="icon">▣</div>
+            <h3>Virtual network monitor</h3>
+            <p>A <code>HEADLESS-*</code> output appears in Hyprland and is streamed to the TV. Move windows there and they stay there.</p>
+          </div>
+          <div class="card">
+            <div class="icon">⇔</div>
+            <h3>Arranger for every display</h3>
+            <p>Drag to position, snap edges, set mode, scale, orientation, mirror, or disable — physical and virtual displays alike.</p>
+          </div>
+          <div class="card">
+            <div class="icon">⏱</div>
+            <h3>~2 s glass-to-glass</h3>
+            <p>Hardware H.264/HEVC through VAAPI into an in-memory LL-HLS fMP4 stream. Tuned for latency, honest about its limits.</p>
+          </div>
+          <div class="card">
+            <div class="icon">🛡</div>
+            <h3>Userspace only</h3>
+            <p>No root, no systemd unit, no firewall edits. Dependencies are system packages or a private venv in your home directory.</p>
+          </div>
+          <div class="card">
+            <div class="icon">↺</div>
+            <h3>Recoverable by design</h3>
+            <p>Trials auto-revert, layouts that would hide every display are refused, and crashes are reconciled on the next shell start.</p>
+          </div>
+          <div class="card">
+            <div class="icon">⌁</div>
+            <h3>Fits the shell</h3>
+            <p>A bar widget with idle / discovering / connecting / casting / error states, desktop notifications, and an IPC surface.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="install">
+        <h2>Install in one command</h2>
+        <p class="sub">Requires Omarchy Quattro (Hyprland + Quickshell) on Arch.</p>
+        <div class="steps">
+          <div class="step">
+            <div>
+              <h3>Add the plugin</h3>
+              <p>Clone, validate, and enable through the standard Omarchy flow.</p>
+              <pre>omarchy plugin add https://github.com/alatcerdas/omascreencast --enable</pre>
+            </div>
+          </div>
+          <div class="step">
+            <div>
+              <h3>Check dependencies</h3>
+              <p>Open the panel → Doctor. If Python packages are missing, <strong>Set up</strong> provisions a private venv — no root.</p>
+              <pre><span class="c"># optional, faster path (needs root once):</span>
+sudo pacman -S python-pychromecast python-zeroconf wf-recorder ffmpeg</pre>
+            </div>
+          </div>
+          <div class="step">
+            <div>
+              <h3>Open one port, then cast</h3>
+              <p>The TV must fetch the stream from your machine. <code>doctor</code> shows the exact rule; nothing changes automatically.</p>
+              <pre>sudo ufw allow 7236/tcp
+<span class="c"># then: panel → pick your TV → “Use TV as monitor”</span></pre>
+            </div>
+          </div>
+          <div class="step">
+            <div>
+              <h3>Arrange and keep</h3>
+              <p>Drag the virtual display next to a physical one so the cursor can reach it. Press <strong>Keep</strong> before the trial timeout, or it reverts.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="limits">
+        <h2>Honest limitations</h2>
+        <p class="sub">Stated up front, because they are physical properties of the Cast protocol.</p>
+        <div class="limits">
+          <div class="card">
+            <h3>What it is good for</h3>
+            <ul>
+              <li>Dashboards, terminals, logs, and monitoring</li>
+              <li>Video, slides, and reference material</li>
+              <li>Overflow space when your laptop screen is full</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>What it is not</h3>
+            <ul>
+              <li>One-way sink: input from the TV is impossible</li>
+              <li>~2 s latency: not for competitive gaming</li>
+              <li>No EDID or hotplug: choose mode and scale yourself</li>
+              <li>No audio in v0.1.0 (lands in v0.1.x)</li>
+              <li>Chromecast only; Miracast/WFD and DLNA are out of scope</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="row">
+        <span>MIT licensed · an independent Omarchy plugin.</span>
+        <span>
+          <a href="https://github.com/alatcerdas/omascreencast">Source</a> ·
+          <a href="https://github.com/alatcerdas/omascreencast/issues">Issues</a> ·
+          <a href="https://github.com/alatcerdas/omascreencast/blob/main/SECURITY.md">Security</a>
+        </span>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>
