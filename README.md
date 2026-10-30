@@ -72,7 +72,7 @@ sudo pacman -S python-pychromecast python-zeroconf wf-recorder ffmpeg
 Via the standard Omarchy plugin flow:
 
 ```sh
-omarchy plugin add https://github.com/<you>/omascreencast --enable
+omarchy plugin add https://github.com/brrrassica/omascreencast --enable
 ```
 
 For local development against this checkout:

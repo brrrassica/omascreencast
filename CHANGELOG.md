@@ -70,7 +70,7 @@ Tracked openly for v0.1.x and later:
 ### Install
 
 ```sh
-omarchy plugin add https://github.com/alatcerdas/omascreencast --enable
+omarchy plugin add https://github.com/brrrassica/omascreencast --enable
 ```
 
 See the [README](README.md) for prerequisites, the quick start, and

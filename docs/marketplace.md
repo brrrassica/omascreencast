@@ -20,9 +20,9 @@ manifest and this file in sync when the listing changes.
 | **Requirements** | Omarchy Quattro (Hyprland + Quickshell), `ffmpeg`, `wf-recorder` or `wl-screenrec`, Python 3 with `pychromecast` + `zeroconf` |
 | **Screenshot** | [`preview.png`](../preview.png) (1200×675) |
 | **Homepage** | <https://omascreencast.alatcerdas.tech> |
-| **Source** | <https://github.com/alatcerdas/omascreencast> |
-| **Issues** | <https://github.com/alatcerdas/omascreencast/issues> |
-| **Install** | `omarchy plugin add https://github.com/alatcerdas/omascreencast --enable` |
+| **Source** | <https://github.com/brrrassica/omascreencast> |
+| **Issues** | <https://github.com/brrrassica/omascreencast/issues> |
+| **Install** | `omarchy plugin add https://github.com/brrrassica/omascreencast --enable` |
 
 ## Short description (≤ 160 chars)
 
