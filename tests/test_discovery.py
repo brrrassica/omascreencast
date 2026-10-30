@@ -158,7 +158,8 @@ let src = fs.readFileSync(process.argv[1], "utf8").replace(/^\.pragma library\s*
 const mod = { exports: {} };
 const run = new Function("module", "exports", "console", src +
   ";module.exports={parseMonitors,parseDevices,parseDiscoveryEvent,parseDoctor," +
-  "deviceLabel,deviceCodecLabel,monitorLabel};");
+  "deviceLabel,deviceCodecLabel,monitorLabel,parseSession,sessionTargetLabel," +
+  "sessionMatchesDevice,monitorSessionLabel,sessionPhaseLabel};");
 run(mod, mod.exports, { warn: function() {}, log: console.log });
 const M = mod.exports;
 
@@ -167,6 +168,11 @@ const ev = M.parseDiscoveryEvent(JSON.stringify({ type: "discovery", devices: [
   { uuid: "u", name: "BRAVIA", host: "1.2.3.4", port: 8009, model: "m", online: true, codecs: ["hevc", "h264"] }
 ]}));
 const doc = M.parseDoctor(JSON.stringify({ ok: true, streamPort: 7236, firewallRule: "ufw" }));
+const sess = M.parseSession(JSON.stringify({ ok: true, active: {
+  name: "HEADLESS-1", deviceUuid: "u", deviceName: "", deviceHost: "1.2.3.4",
+  phase: "casting", pid: 42, res: "1920x1080@60", position: "1920x0"
+}}));
+const bogus = M.parseSession("not json");
 process.stdout.write(JSON.stringify({
   monitorCount: monitors.length,
   virtual: monitors.length > 1 ? monitors[1].virtual : false,
@@ -177,7 +183,14 @@ process.stdout.write(JSON.stringify({
   codecLabel: ev.devices.length ? M.deviceCodecLabel(ev.devices[0]) : "",
   doctorOk: doc.ok,
   doctorPort: doc.streamPort,
-  badJsonSafe: M.parseDevices("not json").length === 0
+  badJsonSafe: M.parseDevices("not json").length === 0,
+  sessionName: sess.active ? sess.active.name : "",
+  sessionPhase: M.sessionPhaseLabel(sess.active),
+  sessionTarget: M.sessionTargetLabel(sess.active, ev.devices),
+  sessionMatches: M.sessionMatchesDevice(sess.active, ev.devices[0]),
+  monitorSuffix: monitors.length > 1
+    ? M.monitorSessionLabel(monitors[1], sess.active, ev.devices) : "",
+  bogusSessionSafe: bogus.active === null && bogus.ok === false
 }));
 """
 
@@ -203,6 +216,12 @@ class ModelJsTest(unittest.TestCase):
         self.assertTrue(out["doctorOk"])
         self.assertEqual(out["doctorPort"], 7236)
         self.assertTrue(out["badJsonSafe"])
+        self.assertEqual(out["sessionName"], "HEADLESS-1")
+        self.assertEqual(out["sessionPhase"], "CASTING")
+        self.assertEqual(out["sessionTarget"], "BRAVIA")
+        self.assertTrue(out["sessionMatches"])
+        self.assertEqual(out["monitorSuffix"], " → BRAVIA")
+        self.assertTrue(out["bogusSessionSafe"])
 
 
 if __name__ == "__main__":

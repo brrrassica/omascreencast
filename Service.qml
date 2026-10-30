@@ -32,6 +32,7 @@ Item {
 
   readonly property string castEngine: scriptsDir + "/cast_engine.py"
   readonly property string bootstrap: scriptsDir + "/bootstrap.py"
+  readonly property string sessionScript: scriptsDir + "/session.py"
 
   // --- shared state (read by Panel.qml) ---
   property var monitors: []
@@ -39,6 +40,10 @@ Item {
   property bool discovering: false
   property var doctor: ({})
   property string lastError: ""
+  // Active virtual-monitor session (single source of truth: session.py).
+  property var activeSession: null
+  property var sessionOrphans: []
+  property bool sessionBusy: false
   // Interpreter the engine should use: system python, or the private venv when
   // the system lacks pychromecast/zeroconf. Resolved by `doctor`.
   property string pythonPath: "python3"
@@ -47,6 +52,8 @@ Item {
   readonly property int deviceCount: devices.length
   readonly property int monitorCount: monitors.length
   readonly property bool depsOk: doctor.ok === true
+  readonly property bool casting: activeSession !== null
+    && String(activeSession.phase || "") !== "stopped"
 
   // --- actions -----------------------------------------------------------
 
@@ -77,6 +84,54 @@ Item {
     if (!doctorProc.running) doctorProc.running = true
   }
 
+  // --- session lifecycle (M2) -------------------------------------------
+
+  function refreshSession() {
+    if (sessionBusy || statusProc.running) return
+    statusProc.command = [pythonPath, sessionScript, "status"]
+    statusProc.running = true
+  }
+
+  // Compare recorded state with Hyprland reality: cleans stale sessions and
+  // reports untracked HEADLESS-* outputs (never removes them automatically).
+  function reconcileSession() {
+    if (sessionBusy || reconcileProc.running) return
+    reconcileProc.command = [pythonPath, sessionScript, "reconcile"]
+    reconcileProc.running = true
+  }
+
+  function connectDevice(device) {
+    if (!device || sessionBusy) return
+    if (casting) {
+      lastError = "Disconnect the active session first"
+      return
+    }
+    var cmd = [pythonPath, sessionScript, "create"]
+    if (device.uuid) cmd.push("--device", String(device.uuid))
+    if (device.host) cmd.push("--host", String(device.host))
+    if (device.name) cmd.push("--device-name", String(device.name))
+    lastError = ""
+    sessionBusy = true
+    createProc.command = cmd
+    createProc.running = true
+  }
+
+  function disconnect() {
+    if (sessionBusy || activeSession === null) return
+    lastError = ""
+    sessionBusy = true
+    removeProc.command = [pythonPath, sessionScript, "remove"]
+    removeProc.running = true
+  }
+
+  function cleanupOrphan(name) {
+    if (sessionBusy || !name) return
+    lastError = ""
+    sessionBusy = true
+    cleanupProc.command = [pythonPath, sessionScript, "cleanup", "--name", String(name)]
+    cleanupProc.running = true
+  }
+
   function startDiscovery() {
     if (discoveryProc.running || !ready) return
     if (!depsOk) {
@@ -91,6 +146,7 @@ Item {
   Component.onCompleted: {
     refreshMonitors()
     runDoctor()
+    reconcileSession()
   }
 
   // --- dependency doctor: resolve deps, then start discovery -------------
@@ -168,6 +224,89 @@ Item {
     }
   }
 
+  // --- session processes (M2) -------------------------------------------
+  Process {
+    id: statusProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (root.sessionBusy) return
+        var r = Model.parseSession(text)
+        if (!r.ok) return
+        root.activeSession = r.active
+        // A stopped session is stale state: converge automatically.
+        if (r.active && String(r.active.phase || "") === "stopped")
+          root.reconcileSession()
+      }
+    }
+  }
+
+  Process {
+    id: reconcileProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseSession(text)
+        root.activeSession = r.active
+        root.sessionOrphans = r.orphans
+        if (!r.ok && r.error !== "") root.lastError = r.error
+        if (r.cleaned) root.refreshMonitors()
+      }
+    }
+  }
+
+  Process {
+    id: createProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseSession(text)
+        root.sessionBusy = false
+        if (r.ok) {
+          root.activeSession = r.active
+          root.lastError = ""
+        } else {
+          root.lastError = r.error !== "" ? r.error : "Could not create the virtual monitor"
+        }
+        root.refreshMonitors()
+        root.refreshSession()
+      }
+    }
+  }
+
+  Process {
+    id: removeProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseSession(text)
+        root.sessionBusy = false
+        if (r.ok) {
+          root.activeSession = null
+          if (r.warnings.length > 0) root.lastError = r.warnings.join("; ")
+        } else {
+          root.lastError = r.error !== "" ? r.error : "Could not stop the session"
+        }
+        root.refreshMonitors()
+        root.reconcileSession()
+      }
+    }
+  }
+
+  Process {
+    id: cleanupProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseSession(text)
+        root.sessionBusy = false
+        if (!r.ok) root.lastError = r.error !== "" ? r.error : "Could not remove the output"
+        root.refreshMonitors()
+        root.reconcileSession()
+      }
+    }
+  }
+
   // --- display enumeration ----------------------------------------------
   Process {
     id: monitorsProc
@@ -176,6 +315,15 @@ Item {
       waitForEnd: true
       onStreamFinished: root.monitors = Model.parseMonitors(text)
     }
+  }
+
+  // Poll the unified session state while a cast is active so the panel tracks
+  // phase changes (starting -> casting -> stopped) written by the engine.
+  Timer {
+    interval: 2000
+    repeat: true
+    running: root.casting
+    onTriggered: root.refreshSession()
   }
 
   // Keep the display list fresh while the shell runs; hyprctl is cheap and

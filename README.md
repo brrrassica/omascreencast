@@ -7,8 +7,9 @@ Unlike screen *mirroring*, omascreencast creates a Hyprland **headless virtual o
 desktop onto it, and streams *that output* to the TV. The TV becomes a real second display you can place,
 resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 
-> **Status:** pre-alpha skeleton (v0.1.0 in progress). Discovery, casting, and the arranger are not wired
-> up yet. See `plans/milestones.md` for the roadmap.
+> **Status:** pre-alpha (v0.1.0 in progress). Discovery and the virtual-monitor session (create /
+> remove / reconcile) are wired; the full arranger lands in M4. See `plans/milestones.md` for the
+> roadmap.
 
 ## What it does
 
@@ -81,6 +82,12 @@ python3 -m unittest discover -s tests -v
 Logs and opt-in debug dumps are written to `~/.config/omascreencast/`
 (`cast_engine.log`, plus `debug/` when `stream --debug` is used). The HLS
 segments themselves are buffered **in RAM** and never written to disk.
+
+The active virtual-monitor session is tracked in the single source of truth
+`~/.local/state/omascreencast/session.json` (atomic writes). The service
+reconciles it against `hyprctl monitors` on startup: stale sessions are cleaned
+automatically, while untracked `HEADLESS-*` outputs are only reported in the
+panel so a display you created by hand is never removed behind your back.
 
 ## Repository layout
 

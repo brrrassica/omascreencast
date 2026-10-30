@@ -41,9 +41,15 @@ Panel {
   readonly property var doctor: service ? service.doctor : ({})
   readonly property string lastError: service ? service.lastError : ""
   readonly property bool depsOk: doctor.ok === true
+  readonly property var activeSession: service ? service.activeSession : null
+  readonly property var sessionOrphans: service ? service.sessionOrphans : []
+  readonly property bool sessionBusy: service ? service.sessionBusy : false
+  readonly property bool sessionActive: activeSession !== null
+    && String(activeSession.phase || "") !== "stopped"
 
   readonly property string stateIcon: {
     if (lastError !== "") return "󰅚"
+    if (activeSession !== null) return "󰒍"
     if (discovering) return "󰑐"
     if (devices.length > 0) return "󰍺"
     return "󰍹"
@@ -51,11 +57,22 @@ Panel {
 
   readonly property string statusText: {
     if (lastError !== "") return lastError.toUpperCase()
+    if (activeSession !== null) {
+      const target = Model.sessionTargetLabel(activeSession, devices)
+      let line = Model.sessionPhaseLabel(activeSession) + " " + activeSession.name
+      if (target !== "") line += " → " + target
+      return line.toUpperCase()
+    }
     if (discovering) return "SEARCHING…"
     var parts = []
     parts.push(monitors.length + (monitors.length === 1 ? " display" : " displays"))
     parts.push(devices.length + (devices.length === 1 ? " device" : " devices"))
     return parts.join(" · ").toUpperCase()
+  }
+
+  // True when this discovered device is the one the active session casts to.
+  function isActiveDevice(device) {
+    return Model.sessionMatchesDevice(activeSession, device)
   }
 
   // --- cursor model (keyboard + mouse share one highlight) ---------------
@@ -180,7 +197,14 @@ Panel {
         if (!root.cursorActive) { root.cursorActive = true; return }
         if (dy !== 0) root.moveCursor(dy)
       }
-      onActivateRequested: if (root.cursorActive) root.cursorActive = true
+      onActivateRequested: {
+        if (!root.cursorActive) return
+        if (root.focusSection !== "devices" || !root.service) return
+        var device = root.devices[root.selectedIndex]
+        if (!device) return
+        if (root.isActiveDevice(device)) root.service.disconnect()
+        else root.service.connectDevice(device)
+      }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -272,6 +296,35 @@ Panel {
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              visible: root.sessionOrphans.length > 0
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width - orphanButton.width - parent.spacing
+                text: "Untracked virtual output"
+                  + (root.sessionOrphans.length === 1 ? ": " : "s: ")
+                  + root.sessionOrphans.join(", ")
+                color: Color.urgent
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.Wrap
+              }
+
+              Button {
+                id: orphanButton
+                text: "Clean up"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                horizontalPadding: Style.spacing.sm
+                verticalPadding: Style.spacing.controlPaddingY
+                enabled: !root.sessionBusy
+                onClicked: if (root.service) root.service.cleanupOrphan(root.sessionOrphans[0])
+              }
             }
 
             Repeater {
@@ -523,6 +576,8 @@ Panel {
 
     readonly property bool isFocused: display && display.focused
     readonly property bool isVirtual: display && display.virtual
+    readonly property string castSuffix: Model.monitorSessionLabel(display, root.activeSession, root.devices)
+    readonly property bool castTarget: castSuffix !== ""
 
     hasCursor: root.cursorActive && root.focusSection === "displays" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(monitorRow)
@@ -554,8 +609,10 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        text: Model.monitorLabel(monitorRow.display) + (monitorRow.isFocused ? " · focused" : "")
-        color: root.bar.foreground
+        text: Model.monitorLabel(monitorRow.display)
+          + monitorRow.castSuffix
+          + (monitorRow.isFocused ? " · focused" : "")
+        color: monitorRow.castTarget ? Commons.Color.accent : root.bar.foreground
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.body
         elide: Text.ElideRight
@@ -565,8 +622,8 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        text: monitorRow.isVirtual ? "NET" : ""
-        visible: monitorRow.isVirtual
+        text: monitorRow.castTarget ? "CAST" : (monitorRow.isVirtual ? "NET" : "")
+        visible: monitorRow.castTarget || monitorRow.isVirtual
         color: Commons.Color.accent
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.caption
@@ -593,6 +650,8 @@ Panel {
     id: deviceRow
     required property var device
     required property int rowIndex
+
+    readonly property bool isActive: root.isActiveDevice(device)
 
     hasCursor: root.cursorActive && root.focusSection === "devices" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(deviceRow)
@@ -622,7 +681,8 @@ Panel {
       }
 
       Column {
-        width: parent.width - Style.space(22) - Style.space(8) - codecText.width - Style.space(8)
+        width: parent.width - Style.space(22) - Style.space(8) - codecText.width
+          - Style.space(8) - connectButton.width - Style.space(8)
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(1)
 
@@ -657,12 +717,32 @@ Panel {
         font.pixelSize: Style.font.caption
         anchors.verticalCenter: parent.verticalCenter
       }
+
+      Button {
+        id: connectButton
+        text: deviceRow.isActive ? "Stop" : "Cast"
+        iconText: deviceRow.isActive ? "󰓛" : "󰐊"
+        bordered: true
+        foreground: root.bar.foreground
+        fontFamily: root.bar.fontFamily
+        horizontalPadding: Style.spacing.sm
+        verticalPadding: Style.spacing.controlPaddingY
+        enabled: !root.sessionBusy && (!root.sessionActive || deviceRow.isActive)
+        opacity: enabled ? 1 : 0.45
+        anchors.verticalCenter: parent.verticalCenter
+        onClicked: {
+          if (!root.service) return
+          if (deviceRow.isActive) root.service.disconnect()
+          else root.service.connectDevice(deviceRow.device)
+        }
+      }
     }
 
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
+      // Hover drives the shared cursor; clicks belong to the Cast/Stop button.
+      acceptedButtons: Qt.NoButton
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
         root.focusSection = "devices"

@@ -44,14 +44,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+# The session-state module is the single source of truth shared with
+# `session.py` and the QML service (M2 split-brain fix). It never imports this
+# module, so there is no cycle.
+import session as session_state  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Paths. Logs and opt-in debug dumps live under ~/.config/omascreencast (a
-# deliberate project decision); runtime session info for `stop` lives there too.
+# deliberate project decision); runtime session state lives in the XDG state
+# directory under `session.py`.
 # ---------------------------------------------------------------------------
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omascreencast"
 LOG_FILE = CONFIG_DIR / "cast_engine.log"
 DEBUG_DIR = CONFIG_DIR / "debug"
-RUNTIME_FILE = CONFIG_DIR / "runtime.json"
 
 DEFAULT_PORT = 7236
 DEFAULT_RENDER_NODE = "/dev/dri/renderD128"
@@ -96,32 +105,6 @@ def setup_logging(debug: bool = False) -> logging.Logger:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-# ---------------------------------------------------------------------------
-# Runtime session info (used by `stop` to find the running stream process)
-# ---------------------------------------------------------------------------
-def _write_runtime(data: dict) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = RUNTIME_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(RUNTIME_FILE)
-
-
-def _read_runtime() -> dict | None:
-    if not RUNTIME_FILE.exists():
-        return None
-    try:
-        return json.loads(RUNTIME_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _clear_runtime() -> None:
-    try:
-        RUNTIME_FILE.unlink()
-    except OSError:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -744,7 +727,10 @@ def discover_once(timeout: float, log: logging.Logger, host: str = "") -> list[D
         key = dev.uuid or dev.host
         if key not in cache:
             dev.codecs = probe_codecs(dev.host)
-            cache[key] = {"name": dev.name, "model": dev.model, "codecs": dev.codecs}
+            cache[key] = {
+                "name": dev.name, "model": dev.model,
+                "host": dev.host, "codecs": dev.codecs,
+            }
             changed = True
     if changed:
         _save_cache(cache)
@@ -799,7 +785,10 @@ def _watch(args: argparse.Namespace, log: logging.Logger) -> int:
                 dev.codecs = list(cached["codecs"])
             else:
                 dev.codecs = probe_codecs(dev.host)
-                cache[key] = {"name": dev.name, "model": dev.model, "codecs": dev.codecs}
+                cache[key] = {
+                    "name": dev.name, "model": dev.model,
+                    "host": dev.host, "codecs": dev.codecs,
+                }
                 _save_cache(cache)
             with lock:
                 found[key] = dev
@@ -863,6 +852,12 @@ def cmd_stream(args: argparse.Namespace) -> int:
         "stream start device=%s host=%s output=%s codec=%s fps=%s bitrate=%s port=%s",
         args.device, args.host, args.output, args.codec, args.fps, args.bitrate, args.port,
     )
+    # Register early so the panel sees "starting" and `remove` can always find us.
+    session_state.update_active({
+        "pid": os.getpid(),
+        "output": args.output,
+        "phase": "starting",
+    })
 
     if not args.device and not args.host:
         emit({"type": "phase", "phase": "error", "detail": "one of --device or --host is required"})
@@ -903,7 +898,9 @@ def cmd_stream(args: argparse.Namespace) -> int:
         return 1
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
-    ip = args.host or lan_ip()
+    # `--host` identifies the *receiver*; the stream URL must point at this
+    # machine, so always resolve the local LAN address (manual-IP sessions).
+    ip = lan_ip()
     url = f"http://{ip}:{args.port}/stream.m3u8"
     log.info("serving %s", url)
 
@@ -964,13 +961,13 @@ def cmd_stream(args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001
             log.warning("block_until_active: %s", exc)
 
-        _write_runtime({
+        session_state.update_active({
             "pid": os.getpid(),
-            "device": args.device,
-            "host": ip,
+            "deviceUuid": args.device,
             "url": url,
             "port": args.port,
             "codec": codec,
+            "phase": "casting",
             "startedAt": _utc_now(),
         })
         emit({"type": "phase", "phase": "casting", "url": url, "device": args.device})
@@ -996,7 +993,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
             time.sleep(0.5)
     finally:
         _teardown(cap, ff, srv, mc, run_dir, log)
-        _clear_runtime()
+        session_state.mark_stopped()
         log.info("stream stopped; buffer stats=%s", buf.stats())
         emit({"type": "phase", "phase": "idle", "detail": "stopped"})
     return 0
@@ -1004,30 +1001,19 @@ def cmd_stream(args: argparse.Namespace) -> int:
 
 def cmd_stop(args: argparse.Namespace) -> int:
     log = setup_logging(False)
-    runtime = _read_runtime()
-    if not runtime or not runtime.get("pid"):
+    active = session_state.load().get("active") or {}
+    pid = active.get("pid")
+    if not pid:
         emit({"type": "phase", "phase": "idle", "detail": "no active session"})
         return 0
 
-    pid = runtime["pid"]
-    log.info("stopping pid %s (device=%s)", pid, runtime.get("device"))
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        log.info("pid %s already gone", pid)
-    except OSError as exc:
-        log.error("cannot signal pid %s: %s", pid, exc)
-        emit({"type": "phase", "phase": "error", "detail": f"cannot stop pid {pid}: {exc}"})
+    log.info("stopping pid %s (device=%s)", pid, active.get("deviceUuid"))
+    if not session_state.stop_process(pid):
+        log.error("pid %s did not exit", pid)
+        emit({"type": "phase", "phase": "error", "detail": f"cannot stop pid {pid}"})
         return 1
 
-    for _ in range(20):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.25)
-
-    _clear_runtime()
+    session_state.mark_stopped()
     emit({"type": "phase", "phase": "idle", "detail": "stopped"})
     return 0
 

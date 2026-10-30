@@ -76,6 +76,99 @@ function parseDiscoveryEvent(raw) {
   return result
 }
 
+// Parse the JSON emitted by scripts/session.py (status / create / remove /
+// reconcile). Returns a safe shape so a malformed line never throws in QML.
+function parseSession(raw) {
+  var result = {
+    ok: false,
+    active: null,
+    error: "",
+    cleaned: false,
+    reasons: [],
+    orphans: [],
+    warnings: []
+  }
+  try {
+    var d = JSON.parse(String(raw || ""))
+    if (!d || typeof d !== "object") return result
+    result.ok = d.ok !== false
+    result.error = String(d.error || "")
+    result.cleaned = d.cleaned === true
+    result.reasons = d.reasons instanceof Array ? d.reasons.map(String) : []
+    result.orphans = d.orphans instanceof Array ? d.orphans.map(String) : []
+    result.warnings = d.warnings instanceof Array ? d.warnings.map(String) : []
+    if (d.active && typeof d.active === "object") {
+      var a = d.active
+      result.active = {
+        name: String(a.name || a.output || ""),
+        deviceUuid: String(a.deviceUuid || a.device || ""),
+        deviceName: String(a.deviceName || ""),
+        deviceHost: String(a.deviceHost || ""),
+        url: String(a.url || ""),
+        port: Number(a.port || 0),
+        codec: String(a.codec || ""),
+        res: String(a.res || ""),
+        position: String(a.position || ""),
+        scale: Number(a.scale || 1),
+        phase: String(a.phase || ""),
+        pid: Number(a.pid || 0)
+      }
+    }
+  } catch (e) {
+    console.warn("omascreencast: parseSession failed: " + e)
+  }
+  return result
+}
+
+// Human label for the receiver a session is casting to, preferring the name
+// recorded at create time and falling back to the live discovery list.
+function sessionTargetLabel(session, devices) {
+  if (!session) return ""
+  var name = String(session.deviceName || "")
+  if (name !== "") return name
+  var uuid = String(session.deviceUuid || "")
+  var host = String(session.deviceHost || "")
+  var list = devices instanceof Array ? devices : []
+  for (var i = 0; i < list.length; i++) {
+    var d = list[i]
+    if ((uuid !== "" && String(d.uuid || "") === uuid) ||
+        (host !== "" && String(d.host || "") === host)) {
+      return String(d.name || d.host || "")
+    }
+  }
+  return host !== "" ? host : uuid
+}
+
+// True when the active session targets the given discovered device. A manual
+// host (no uuid) is matched by its IP.
+function sessionMatchesDevice(session, device) {
+  if (!session || !device) return false
+  var uuid = String(session.deviceUuid || "")
+  var devUuid = String(device.uuid || "")
+  if (uuid !== "" && devUuid !== "") return uuid === devUuid
+  var host = String(session.deviceHost || "")
+  var devHost = String(device.host || "")
+  return host !== "" && host === devHost
+}
+
+// Suffix for a virtual output row: " → Sony Bravia" when it is the cast target.
+function monitorSessionLabel(monitor, session, devices) {
+  if (!monitor || !session) return ""
+  if (String(session.name || "") !== String(monitor.name || "")) return ""
+  var target = sessionTargetLabel(session, devices)
+  return target !== "" ? " → " + target : ""
+}
+
+// Short uppercase phase label for the bar icon tooltip / hero.
+function sessionPhaseLabel(session) {
+  if (!session || String(session.name || "") === "") return ""
+  var phase = String(session.phase || "")
+  if (phase === "casting") return "CASTING"
+  if (phase === "starting") return "CONNECTING"
+  if (phase === "stopped") return "STOPPED"
+  return phase !== "" ? phase.toUpperCase() : "ACTIVE"
+}
+
 // Parse the JSON emitted by scripts/bootstrap.py doctor.
 function parseDoctor(raw) {
   var result = {
