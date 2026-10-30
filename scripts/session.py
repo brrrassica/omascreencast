@@ -38,6 +38,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,8 @@ DEFAULT_BITRATE = "6M"
 DEFAULT_CODEC = "auto"
 STREAM_STOP_TIMEOUT = 6.0
 CREATE_HEALTH_DELAY = 0.75
+OUTPUT_WAIT_TIMEOUT = 6.0
+OWNER = "tech.alatcerdas.omascreencast"
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _MODE_RE = re.compile(r"^\d{2,5}x\d{2,5}@\d{2,3}(?:\.\d+)?$")
@@ -101,7 +104,24 @@ def load() -> dict:
     return data
 
 
-def save(state: dict) -> None:
+@contextmanager
+def _state_lock():
+    """Advisory exclusive lock shared by the CLI, QML and the engine."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Linux-only project
+        yield
+        return
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(str(STATE_FILE) + ".lock", "a", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _save_unlocked(state: dict) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state.setdefault("version", STATE_VERSION)
     state.setdefault("active", None)
@@ -115,17 +135,23 @@ def save(state: dict) -> None:
         pass
 
 
+def save(state: dict) -> None:
+    with _state_lock():
+        _save_unlocked(state)
+
+
 def update_active(fields: dict) -> dict | None:
     """Merge fields into the active session, creating one if the engine runs alone."""
-    state = load()
-    active = state.get("active")
-    if not isinstance(active, dict):
-        active = {}
-    active.update(fields)
-    active["updatedAt"] = _now()
-    state["active"] = active
-    state["version"] = STATE_VERSION
-    save(state)
+    with _state_lock():
+        state = load()
+        active = state.get("active")
+        if not isinstance(active, dict):
+            active = {}
+        active.update(fields)
+        active["updatedAt"] = _now()
+        state["active"] = active
+        state["version"] = STATE_VERSION
+        _save_unlocked(state)
     return active
 
 
@@ -267,6 +293,25 @@ def _tail(path: Path, limit: int = 400) -> str:
         return ""
 
 
+def stream_log_offset() -> int:
+    """Byte offset of the current end of the stream log (per-run error tail)."""
+    try:
+        return STREAM_LOG.stat().st_size
+    except OSError:
+        return 0
+
+
+def _tail_since(path: Path, offset: int, limit: int = 2000) -> str:
+    """Read only what this run appended, so old errors are never reported."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(max(0, int(offset)))
+            data = handle.read(limit)
+        return data.decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # hyprctl helpers
 # ---------------------------------------------------------------------------
@@ -394,8 +439,10 @@ def apply_arrangement(name: str, mode: str, position: str, scale: float = 1.0) -
         raise SessionError(f"invalid scale: {scale!r}")
 
     result = _run(["hyprctl", "eval", lua_monitor_rule(name, mode, position, scale_value)])
-    if result.returncode != 0:
-        raise SessionError(f"could not arrange {name}: {_stderr(result)}")
+    message = _stderr(result)
+    lowered = message.lower()
+    if result.returncode != 0 or "error" in lowered or "invalid" in lowered:
+        raise SessionError(f"could not arrange {name}: {message or 'unknown error'}")
 
 
 def create_headless_output(name: str | None = None) -> tuple[str, list[dict]]:
@@ -427,7 +474,7 @@ def create_headless_output(name: str | None = None) -> tuple[str, list[dict]]:
     return sorted(created)[0], monitors
 
 
-def wait_for_new_output(before: set[str], timeout: float = 3.0) -> list[dict]:
+def wait_for_new_output(before: set[str], timeout: float = OUTPUT_WAIT_TIMEOUT) -> list[dict]:
     """Poll the monitor list until an output not in ``before`` appears."""
     deadline = time.monotonic() + timeout
     monitors = list_monitors()
@@ -486,7 +533,10 @@ def _cleanup_active(active: dict) -> None:
     if pid:
         stop_process(pid)
     name = str(active.get("name") or "")
-    if name:
+    # Only remove an output we recorded as ours. A legacy record without the
+    # marker is still treated as ours; anything else is left alone.
+    owned = active.get("ownedBy") in (OWNER, None)
+    if name and owned:
         try:
             remove_output(name)
         except SessionError:
@@ -611,6 +661,7 @@ def _create(args: argparse.Namespace) -> int:
         monitor = find_monitor(created_name, list_monitors()) or {}
         active = {
             "name": created_name,
+            "ownedBy": OWNER,
             "deviceUuid": args.device,
             "deviceName": args.device_name or info.get("name") or "",
             "deviceHost": device_host,
@@ -638,6 +689,7 @@ def _create(args: argparse.Namespace) -> int:
             port=args.port,
             codec=args.codec,
         )
+        log_offset = stream_log_offset()
         pid = spawn_stream(command)
         if not pid:
             raise SessionError("could not start the cast engine")
@@ -646,7 +698,7 @@ def _create(args: argparse.Namespace) -> int:
         # A missing pychromecast / bad port fails within this short window.
         time.sleep(CREATE_HEALTH_DELAY)
         if not pid_alive(pid):
-            tail = _tail(STREAM_LOG)
+            tail = _tail_since(STREAM_LOG, log_offset)
             raise SessionError(
                 "the cast engine exited immediately" + (f": {tail}" if tail else "")
             )
@@ -703,7 +755,23 @@ def cmd_remove(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     state = load()
-    _emit({"ok": True, "active": state.get("active")})
+    active = state.get("active")
+    alive = False
+    output_present = None
+    if isinstance(active, dict) and active:
+        alive = bool(active.get("pid")) and pid_alive(active.get("pid"))
+        name = str(active.get("name") or "")
+        if name:
+            try:
+                output_present = name in _monitor_names(list_monitors())
+            except SessionError:
+                output_present = None
+    _emit({
+        "ok": True,
+        "active": active,
+        "alive": alive,
+        "outputPresent": output_present,
+    })
     return 0
 
 
@@ -714,6 +782,32 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     except SessionError as exc:
         _emit({"ok": False, "error": str(exc), "cleaned": False, "orphans": []})
         return 1
+
+
+def find_stream_processes(output: str) -> list[int]:
+    """Find our ``cast_engine.py stream --output <output>`` processes."""
+    found: list[int] = []
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return found
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == os.getpid():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+        if not argv or not any(Path(part).name == "cast_engine.py" for part in argv):
+            continue
+        if "stream" not in argv:
+            continue
+        if output in argv or f"--output={output}" in argv:
+            found.append(pid)
+    return found
 
 
 def cmd_cleanup(args: argparse.Namespace) -> int:
@@ -735,7 +829,16 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     except SessionError as exc:
         _emit({"ok": False, "error": str(exc)})
         return 1
-    _emit({"ok": True, "removed": True, "name": name})
+    # The output is gone, but a lost-state engine may still be running. Stop
+    # any stream process that was casting exactly this output.
+    stopped: list[int] = []
+    for pid in find_stream_processes(name):
+        if stop_process(pid):
+            stopped.append(pid)
+    payload: dict = {"ok": True, "removed": True, "name": name}
+    if stopped:
+        payload["stopped"] = stopped
+    _emit(payload)
     return 0
 
 

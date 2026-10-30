@@ -27,18 +27,27 @@
     "defaultSection": "right",
     "defaults": {
       "codec": "auto",
+      "resolution": "1920x1080@60",
       "fps": 30,
       "bitrateMbps": 6,
       "audio": "Off"
     },
     "schema": [
       {
+        "key": "resolution",
+        "type": "enum",
+        "label": "Virtual monitor resolution",
+        "options": ["1920x1080@60"],
+        "defaultValue": "1920x1080@60",
+        "description": "Hyprland headless outputs currently offer 1920x1080@60 (Spike A)."
+      },
+      {
         "key": "codec",
         "type": "enum",
         "label": "Codec",
-        "options": ["auto", "hevc", "h264", "vp9", "av1"],
+        "options": ["auto", "hevc", "h264", "vp9"],
         "defaultValue": "auto",
-        "description": "auto prefers HEVC when the receiver advertises it, otherwise falls back to H.264. VP9 is software-only; AV1 is experimental."
+        "description": "auto prefers HEVC when the receiver advertises it, otherwise falls back to H.264. VP9 is software-only; AV1 is CLI-only/experimental on this hardware."
       },
       {
         "key": "fps",

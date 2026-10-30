@@ -27,9 +27,20 @@ Panel {
 
   // Read from this widget's inline shell.json entry (see Ui/BarWidget.setting).
   readonly property string codec: setting("codec", "auto")
+  readonly property string resolution: setting("resolution", "1920x1080@60")
   readonly property int fps: setting("fps", 30)
   readonly property int bitrateMbps: setting("bitrateMbps", 6)
   readonly property string audio: setting("audio", "Off")
+
+  // Tunables handed to session.py create (M3).
+  function connectOptions() {
+    return {
+      res: root.resolution,
+      fps: root.fps,
+      bitrate: String(root.bitrateMbps) + "M",
+      codec: root.codec
+    }
+  }
 
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
@@ -46,6 +57,11 @@ Panel {
   readonly property bool sessionBusy: service ? service.sessionBusy : false
   readonly property bool sessionActive: activeSession !== null
     && String(activeSession.phase || "") !== "stopped"
+  readonly property var displayRules: service ? service.displayRules : []
+  readonly property string displayError: service ? service.displayError : ""
+  readonly property bool displayBusy: service ? service.displayBusy : false
+  readonly property bool provisioning: service ? service.provisioning : false
+  readonly property var overlappingPairs: Model.overlappingDisplays(monitors)
 
   readonly property string stateIcon: {
     if (lastError !== "") return "󰅚"
@@ -159,9 +175,32 @@ Panel {
     if (!opened) return
     if (service) {
       service.refreshMonitors()
+      service.refreshDisplayRules()
       service.refreshDevices()
     }
     cursorActive = false
+  }
+
+  // --- arranger actions (M4) --------------------------------------------
+  function displayFields(display) {
+    return Model.displayFieldsFor(display, root.displayRules)
+  }
+
+  function withField(fields, key, value) {
+    var out = {}
+    for (var k in fields) out[k] = fields[k]
+    out[key] = value
+    return out
+  }
+
+  function applyDisplay(display, fields) {
+    if (!service || !display) return
+    service.applyDisplayRule(Model.displayRulePayload(display, fields))
+  }
+
+  function saveDisplay(display, fields) {
+    if (!service || !display) return
+    service.saveDisplayRule(Model.displayRulePayload(display, fields))
   }
 
   implicitWidth: button.implicitWidth
@@ -203,7 +242,7 @@ Panel {
         var device = root.devices[root.selectedIndex]
         if (!device) return
         if (root.isActiveDevice(device)) root.service.disconnect()
-        else root.service.connectDevice(device)
+        else root.service.connectDevice(device, root.connectOptions())
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -293,6 +332,38 @@ Panel {
               width: parent.width
               text: "No displays reported by Hyprland."
               color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+            }
+
+            // Drag displays to set their layout position; edges snap to
+            // neighbouring displays (M4).
+            ArrangementCanvas {
+              id: arrangement
+              visible: root.monitors.length > 0
+              width: parent.width
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.overlappingPairs.length > 0
+              width: parent.width
+              text: "Overlapping displays: " + root.overlappingPairs.map(function(pair) {
+                return pair.join(" / ")
+              }).join(", ")
+              color: Color.urgent
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.displayError !== ""
+              width: parent.width
+              text: root.displayError
+              color: Color.urgent
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
@@ -460,7 +531,7 @@ Panel {
 
             Item {
               width: parent.width
-              implicitHeight: Math.max(doctorHeader.implicitHeight, doctorRerun.implicitHeight)
+              implicitHeight: Math.max(doctorHeader.implicitHeight, doctorActions.implicitHeight)
 
               PanelSectionHeader {
                 id: doctorHeader
@@ -471,24 +542,47 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
               }
 
-              Button {
-                id: doctorRerun
+              Row {
+                id: doctorActions
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Re-run"
-                iconText: "󰑐"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                horizontalPadding: Style.spacing.sm
-                verticalPadding: Style.spacing.controlPaddingY
-                onClicked: if (root.service) root.service.runDoctor()
+                spacing: Style.space(6)
+
+                Button {
+                  id: doctorSetup
+                  text: root.provisioning ? "Setting up…" : "Set up"
+                  iconText: "󰏗"
+                  bordered: true
+                  enabled: !root.provisioning
+                  opacity: enabled ? 1 : 0.45
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  horizontalPadding: Style.spacing.sm
+                  verticalPadding: Style.spacing.controlPaddingY
+                  onClicked: if (root.service) root.service.provisionDependencies()
+                }
+
+                Button {
+                  id: doctorRerun
+                  text: "Re-run"
+                  iconText: "󰑐"
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  horizontalPadding: Style.spacing.sm
+                  verticalPadding: Style.spacing.controlPaddingY
+                  onClicked: if (root.service) root.service.runDoctor()
+                }
               }
             }
 
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: root.depsOk ? "All dependencies present." : "Some dependencies are missing."
+              text: root.depsOk
+                ? "All dependencies present."
+                : (root.doctor.pythonOk === true
+                   ? "Capture tools are missing — see below."
+                   : "Python dependencies are missing — press Set up.")
               color: root.depsOk ? Qt.darker(root.bar.foreground, 1.3) : Color.urgent
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -569,15 +663,146 @@ Panel {
     manualField.text = ""
   }
 
+  // Scrollable-free spatial preview of the layout: drag a display to move it.
+  component ArrangementCanvas: Rectangle {
+    id: canvas
+    readonly property var bounds: Model.arrangementBounds(root.monitors)
+    readonly property real pad: Style.space(10)
+    readonly property real factor: Math.min(
+      Math.max(1, width - pad * 2) / bounds.width,
+      Math.max(1, implicitHeight - pad * 2) / bounds.height)
+    readonly property real offX: pad + (Math.max(1, width - pad * 2) - bounds.width * factor) / 2
+    readonly property real offY: pad + (Math.max(1, implicitHeight - pad * 2) - bounds.height * factor) / 2
+    implicitHeight: Style.space(150)
+    color: "transparent"
+    border.width: 1
+    border.color: Qt.darker(root.bar.foreground, 2.4)
+    radius: Style.space(6)
+    clip: true
+
+    function pxX(logicalX) { return offX + (Number(logicalX) - bounds.minX) * factor }
+    function pxY(logicalY) { return offY + (Number(logicalY) - bounds.minY) * factor }
+
+    Repeater {
+      model: root.monitors
+
+      Rectangle {
+        id: card
+        required property var modelData
+        required property int index
+
+        property bool dragging: false
+        property real dragX: Number(modelData.x || 0)
+        property real dragY: Number(modelData.y || 0)
+        readonly property var size: Model.monitorLogicalSize(modelData)
+        readonly property bool isVirtual: modelData.virtual === true
+        readonly property bool isDisabled: modelData.disabled === true
+
+        x: Math.round(canvas.pxX(dragging ? dragX : modelData.x))
+        y: Math.round(canvas.pxY(dragging ? dragY : modelData.y))
+        width: Math.max(Style.space(24), size.width * canvas.factor)
+        height: Math.max(Style.space(16), size.height * canvas.factor)
+        radius: Style.space(3)
+        opacity: isDisabled ? 0.35 : 1
+        color: isVirtual ? Qt.darker(Commons.Color.accent, 2.6) : "transparent"
+        border.width: 1
+        border.color: isVirtual ? Commons.Color.accent : root.bar.foreground
+
+        Text {
+          anchors.fill: parent
+          anchors.margins: Style.space(2)
+          textFormat: Text.PlainText
+          text: String(modelData.name || "")
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+          horizontalAlignment: Text.AlignHCenter
+          verticalAlignment: Text.AlignVCenter
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          enabled: !card.isDisabled
+          cursorShape: Qt.SizeAllCursor
+          property real pressX: 0
+          property real pressY: 0
+          property real startLogicalX: 0
+          property real startLogicalY: 0
+
+          onPressed: function(mouse) {
+            var point = mapToItem(canvas, mouse.x, mouse.y)
+            pressX = point.x
+            pressY = point.y
+            startLogicalX = Number(modelData.x || 0)
+            startLogicalY = Number(modelData.y || 0)
+            card.dragging = true
+            card.dragX = startLogicalX
+            card.dragY = startLogicalY
+          }
+
+          onPositionChanged: function(mouse) {
+            if (!pressed) return
+            var point = mapToItem(canvas, mouse.x, mouse.y)
+            var logicalX = startLogicalX + (point.x - pressX) / canvas.factor
+            var logicalY = startLogicalY + (point.y - pressY) / canvas.factor
+            var snapped = Model.snapPosition(modelData, logicalX, logicalY, root.monitors, 16)
+            card.dragX = snapped.x
+            card.dragY = snapped.y
+          }
+
+          onReleased: {
+            if (!card.dragging) return
+            card.dragging = false
+            var fields = root.displayFields(modelData)
+            fields = root.withField(fields, "position",
+              Math.round(card.dragX) + "x" + Math.round(card.dragY))
+            root.applyDisplay(modelData, fields)
+          }
+        }
+      }
+    }
+  }
+
   component MonitorRow: CursorSurface {
     id: monitorRow
     required property var display
     required property int rowIndex
 
+    property bool expanded: false
+    property var edits: Model.displayFieldsFor(display, root.displayRules)
+
     readonly property bool isFocused: display && display.focused
     readonly property bool isVirtual: display && display.virtual
     readonly property string castSuffix: Model.monitorSessionLabel(display, root.activeSession, root.devices)
     readonly property bool castTarget: castSuffix !== ""
+    readonly property var modeChoices: {
+      var list = Model.monitorModes(display)
+      var mode = String(edits.mode || "")
+      if (mode !== "" && list.indexOf(mode) < 0) list.unshift(mode)
+      return list
+    }
+    readonly property var mirrorChoices: {
+      var list = ["None"]
+      for (var i = 0; i < root.monitors.length; i++) {
+        var other = root.monitors[i]
+        if (String(other.name) !== String(display.name)) list.push(String(other.name))
+      }
+      return list
+    }
+    readonly property var scaleChoices: {
+      var list = ["0.75", "1", "1.25", "1.5", "1.75", "2", "2.5", "3"]
+      var current = String(edits.scale)
+      if (current !== "" && list.indexOf(current) < 0) list.unshift(current)
+      return list
+    }
+    readonly property var orientationChoices: ["Normal", "90°", "180°", "270°"]
+
+    function resetEdits() { edits = Model.displayFieldsFor(display, root.displayRules) }
+    function update(key, value) { edits = root.withField(edits, key, value) }
+
+    onDisplayChanged: resetEdits()
+    onExpandedChanged: if (expanded) resetEdits()
 
     hasCursor: root.cursorActive && root.focusSection === "displays" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(monitorRow)
@@ -585,58 +810,240 @@ Panel {
     foreground: root.bar.foreground
     fill: Style.hoverFillFor(root.bar.foreground, Commons.Color.accent)
     currentFill: Style.selectedFillFor(root.bar.foreground, Commons.Color.accent)
-    implicitHeight: monitorInner.implicitHeight + Style.spacing.xl
+    implicitHeight: monitorColumn.implicitHeight + Style.spacing.xl
 
-    Row {
-      id: monitorInner
+    Column {
+      id: monitorColumn
       anchors.left: parent.left
       anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
+      anchors.top: parent.top
+      anchors.topMargin: Style.space(6)
       anchors.leftMargin: Style.space(6)
       anchors.rightMargin: Style.space(6)
       spacing: Style.space(8)
 
-      Text {
-        textFormat: Text.PlainText
-        text: monitorRow.isVirtual ? "󰒍" : "󰍹"
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.title
-        width: Style.space(22)
-        horizontalAlignment: Text.AlignHCenter
-        anchors.verticalCenter: parent.verticalCenter
+      Row {
+        id: monitorInner
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          textFormat: Text.PlainText
+          text: monitorRow.isVirtual ? "󰒍" : "󰍹"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.title
+          width: Style.space(22)
+          horizontalAlignment: Text.AlignHCenter
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: Model.monitorLabel(monitorRow.display)
+            + monitorRow.castSuffix
+            + (monitorRow.isFocused ? " · focused" : "")
+          color: monitorRow.castTarget ? Commons.Color.accent : root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+          width: parent.width - Style.space(22) - Style.space(14) - Style.space(34)
+            - arrangeButton.width - Style.space(24)
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: monitorRow.castTarget ? "CAST" : (monitorRow.isVirtual ? "NET" : "")
+          visible: monitorRow.castTarget || monitorRow.isVirtual
+          color: Commons.Color.accent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          width: Style.space(30)
+          horizontalAlignment: Text.AlignRight
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Button {
+          id: arrangeButton
+          text: monitorRow.expanded ? "Close" : "Arrange"
+          bordered: true
+          foreground: root.bar.foreground
+          fontFamily: root.bar.fontFamily
+          horizontalPadding: Style.spacing.sm
+          verticalPadding: Style.spacing.controlPaddingY
+          anchors.verticalCenter: parent.verticalCenter
+          onClicked: monitorRow.expanded = !monitorRow.expanded
+        }
       }
 
-      Text {
-        textFormat: Text.PlainText
-        text: Model.monitorLabel(monitorRow.display)
-          + monitorRow.castSuffix
-          + (monitorRow.isFocused ? " · focused" : "")
-        color: monitorRow.castTarget ? Commons.Color.accent : root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-        elide: Text.ElideRight
-        width: parent.width - Style.space(22) - Style.space(14) - Style.space(16)
-        anchors.verticalCenter: parent.verticalCenter
-      }
+      Column {
+        id: controls
+        width: parent.width
+        visible: monitorRow.expanded
+        spacing: Style.space(6)
 
-      Text {
-        textFormat: Text.PlainText
-        text: monitorRow.castTarget ? "CAST" : (monitorRow.isVirtual ? "NET" : "")
-        visible: monitorRow.castTarget || monitorRow.isVirtual
-        color: Commons.Color.accent
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.caption
-        font.bold: true
-        width: Style.space(30)
-        horizontalAlignment: Text.AlignRight
-        anchors.verticalCenter: parent.verticalCenter
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Column {
+            spacing: Style.space(2)
+            Text {
+              textFormat: Text.PlainText
+              text: "Mode"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            ComboBox {
+              width: Style.space(160)
+              model: monitorRow.modeChoices
+              currentIndex: Math.max(0, monitorRow.modeChoices.indexOf(String(monitorRow.edits.mode)))
+              font.family: root.bar.fontFamily
+              onActivated: monitorRow.update("mode", currentText)
+            }
+          }
+
+          Column {
+            spacing: Style.space(2)
+            Text {
+              textFormat: Text.PlainText
+              text: "Scale"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            ComboBox {
+              width: Style.space(78)
+              model: monitorRow.scaleChoices
+              currentIndex: Math.max(0, monitorRow.scaleChoices.indexOf(String(monitorRow.edits.scale)))
+              font.family: root.bar.fontFamily
+              onActivated: monitorRow.update("scale", Number(currentText))
+            }
+          }
+
+          Column {
+            spacing: Style.space(2)
+            Text {
+              textFormat: Text.PlainText
+              text: "Rotate"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            ComboBox {
+              width: Style.space(96)
+              model: monitorRow.orientationChoices
+              currentIndex: Math.max(0, Math.min(3, Number(monitorRow.edits.transform || 0)))
+              font.family: root.bar.fontFamily
+              onActivated: monitorRow.update("transform", currentIndex)
+            }
+          }
+        }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Column {
+            spacing: Style.space(2)
+            Text {
+              textFormat: Text.PlainText
+              text: "Mirror"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            ComboBox {
+              width: Style.space(160)
+              model: monitorRow.mirrorChoices
+              currentIndex: {
+                var mirror = String(monitorRow.edits.mirror || "")
+                var idx = monitorRow.mirrorChoices.indexOf(mirror === "" ? "None" : mirror)
+                return idx < 0 ? 0 : idx
+              }
+              font.family: root.bar.fontFamily
+              onActivated: monitorRow.update("mirror", currentIndex === 0 ? "" : currentText)
+            }
+          }
+
+          Button {
+            text: monitorRow.edits.disabled ? "Disabled" : "Enabled"
+            bordered: true
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            horizontalPadding: Style.spacing.sm
+            verticalPadding: Style.spacing.controlPaddingY
+            anchors.bottom: parent.bottom
+            onClicked: monitorRow.update("disabled", monitorRow.edits.disabled !== true)
+          }
+        }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width - applyButton.width - saveButton.width - Style.space(16)
+            text: "Position " + String(monitorRow.edits.position || "")
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Button {
+            id: applyButton
+            text: "Apply"
+            iconText: "󰄬"
+            bordered: true
+            enabled: !root.displayBusy
+            opacity: enabled ? 1 : 0.45
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            horizontalPadding: Style.spacing.sm
+            verticalPadding: Style.spacing.controlPaddingY
+            onClicked: root.applyDisplay(monitorRow.display, monitorRow.edits)
+          }
+
+          Button {
+            id: saveButton
+            text: "Save"
+            iconText: "󰆓"
+            bordered: true
+            enabled: !root.displayBusy
+            opacity: enabled ? 1 : 0.45
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            horizontalPadding: Style.spacing.sm
+            verticalPadding: Style.spacing.controlPaddingY
+            onClicked: root.saveDisplay(monitorRow.display, monitorRow.edits)
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: Model.displayRuleFor(monitorRow.display, root.displayRules) === null
+          text: monitorRow.isVirtual
+            ? "Not saved yet — use Save to persist this virtual output's layout."
+            : "No saved rule — Apply is temporary; Save writes monitors.lua (backed up)."
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
       }
     }
 
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
+      acceptedButtons: Qt.NoButton
       cursorShape: Qt.ArrowCursor
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
@@ -733,7 +1140,7 @@ Panel {
         onClicked: {
           if (!root.service) return
           if (deviceRow.isActive) root.service.disconnect()
-          else root.service.connectDevice(deviceRow.device)
+          else root.service.connectDevice(deviceRow.device, root.connectOptions())
         }
       }
     }

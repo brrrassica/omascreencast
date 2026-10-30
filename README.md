@@ -7,9 +7,12 @@ Unlike screen *mirroring*, omascreencast creates a Hyprland **headless virtual o
 desktop onto it, and streams *that output* to the TV. The TV becomes a real second display you can place,
 resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 
-> **Status:** pre-alpha (v0.1.0 in progress). Discovery and the virtual-monitor session (create /
-> remove / reconcile) are wired; the full arranger lands in M4. See `plans/milestones.md` for the
-> roadmap.
+> **Status:** pre-alpha (v0.1.0 in progress). Discovery, the virtual-monitor session (create /
+> remove / reconcile), the capture → encode → LL-HLS → Chromecast pipeline, and the monitor
+> arranger (drag, snap, mode/scale/rotation/disable/mirror, persist) are wired, including a
+> rootless “Set up” dependency action and crash-out reconciliation. Remaining work is hardware
+> verification, recovery edge cases, notifications/settings/IPC, and packaging. See
+> `plans/milestones.md`.
 
 ## What it does
 
@@ -38,17 +41,20 @@ resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 
 - Omarchy Quattro (Hyprland + Quickshell) on Arch. Verified on Omarchy 4.0.6 / Hyprland 0.56.2 /
   Quickshell 0.3.2.
-- `hyprctl`, `wf-recorder`, `ffmpeg` (all in the official Arch repos).
+- `hyprctl`, `wf-recorder` (or `wl-screenrec`), `ffmpeg` (all in the official Arch repos).
 - Python 3 with `pychromecast` and `zeroconf`.
 
 Dependencies are resolved **without root**: the plugin prefers system-installed
 `python-pychromecast` / `python-zeroconf`, and otherwise provisions a private venv under
-`~/.local/share/omascreencast/venv` on first use.
+`~/.local/share/omascreencast/venv` on first use (the panel’s Doctor section exposes a
+**Set up** action for this).
 
 Optional, faster path (one-time, requires root):
 
 ```sh
 sudo pacman -S python-pychromecast python-zeroconf wf-recorder ffmpeg
+# optional zero-copy capture backend (preferred when installed):
+# sudo pacman -S wl-screenrec
 ```
 
 ## Install
@@ -79,9 +85,13 @@ omarchy-shell shell rescanPlugins
 python3 -m unittest discover -s tests -v
 ```
 
-Logs and opt-in debug dumps are written to `~/.config/omascreencast/`
+Logs and opt-in debug dumps are written to `~/.local/state/omascreencast/`
 (`cast_engine.log`, plus `debug/` when `stream --debug` is used). The HLS
-segments themselves are buffered **in RAM** and never written to disk.
+segments themselves are buffered **in RAM** and never written to disk. For
+LL-HLS the capture backend prefers `wf-recorder` because it can pin a short GOP
+(one keyframe-aligned part per fragment); `wl-screenrec` remains the fallback
+and can be selected explicitly. The VAAPI node is discovered from
+`/dev/dri/renderD*`.
 
 The active virtual-monitor session is tracked in the single source of truth
 `~/.local/state/omascreencast/session.json` (atomic writes). The service
@@ -99,7 +109,7 @@ Model.js               # pure JSON -> view-model helpers
 scripts/
   bootstrap.py         # rootless dependency resolution (system pkgs -> private venv)
   cast_engine.py       # discovery + capture -> encode -> serve -> Chromecast (in-memory LL-HLS)
-  display_config.py    # literal-only editor for ~/.config/hypr/monitors.lua
+  display_config.py    # literal-only reader/writer for ~/.config/hypr/monitors.lua (arranger)
   session.py           # session-state tracking + orphan reconciliation
 tests/                 # unittest suite + captured fixtures
 plans/                 # local-only roadmap (gitignored)

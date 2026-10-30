@@ -15,6 +15,8 @@ function parseMonitors(raw) {
       list.push({
         name: String(m.name || ""),
         description: String(m.description || ""),
+        make: String(m.make || ""),
+        model: String(m.model || ""),
         width: Number(m.width || 0),
         height: Number(m.height || 0),
         refreshRate: Number(m.refreshRate || 0),
@@ -24,6 +26,8 @@ function parseMonitors(raw) {
         transform: Number(m.transform || 0),
         disabled: m.disabled === true,
         focused: m.focused === true,
+        mirrorOf: String(m.mirrorOf || "none"),
+        availableModes: m.availableModes instanceof Array ? m.availableModes.map(String) : [],
         virtual: String(m.name || "").indexOf("HEADLESS") === 0
       })
     }
@@ -62,13 +66,14 @@ function parseDevices(raw) {
 // Returns { type, phase, detail, devices } with safe defaults so a malformed
 // line never throws in the panel.
 function parseDiscoveryEvent(raw) {
-  var result = { type: "", phase: "", detail: "", devices: [] }
+  var result = { type: "", phase: "", detail: "", devices: [], browsing: false }
   try {
     var msg = JSON.parse(String(raw || ""))
     if (!msg || typeof msg !== "object") return result
     result.type = String(msg.type || "")
     result.phase = String(msg.phase || "")
     result.detail = String(msg.detail || "")
+    result.browsing = msg.browsing === true
     if (msg.devices instanceof Array) result.devices = parseDevices(msg.devices)
   } catch (e) {
     console.warn("omascreencast: parseDiscoveryEvent failed: " + e)
@@ -86,7 +91,9 @@ function parseSession(raw) {
     cleaned: false,
     reasons: [],
     orphans: [],
-    warnings: []
+    warnings: [],
+    alive: false,
+    outputPresent: true
   }
   try {
     var d = JSON.parse(String(raw || ""))
@@ -97,6 +104,9 @@ function parseSession(raw) {
     result.reasons = d.reasons instanceof Array ? d.reasons.map(String) : []
     result.orphans = d.orphans instanceof Array ? d.orphans.map(String) : []
     result.warnings = d.warnings instanceof Array ? d.warnings.map(String) : []
+    result.alive = d.alive === true
+    // Only an explicit false is a missing output; null means "could not check".
+    result.outputPresent = d.outputPresent !== false
     if (d.active && typeof d.active === "object") {
       var a = d.active
       result.active = {
@@ -173,6 +183,8 @@ function sessionPhaseLabel(session) {
 function parseDoctor(raw) {
   var result = {
     ok: false,
+    pythonOk: false,
+    pipelineOk: false,
     missingBinaries: [],
     missingPython: [],
     venv: "",
@@ -187,6 +199,8 @@ function parseDoctor(raw) {
     var d = JSON.parse(String(raw || ""))
     if (!d || typeof d !== "object") return result
     result.ok = d.ok === true
+    result.pythonOk = d.pythonOk === true
+    result.pipelineOk = d.pipelineOk === true
     result.missingBinaries = d.missingBinaries instanceof Array ? d.missingBinaries : []
     result.missingPython = d.missingPython instanceof Array ? d.missingPython : []
     result.venv = String(d.venv || "")
@@ -234,4 +248,225 @@ function monitorLabel(monitor) {
     ? monitor.width + "×" + monitor.height : ""
   if (res === "") return name
   return name + " · " + res
+}
+
+// ---------------------------------------------------------------------------
+// M4 — monitor arranger helpers
+// ---------------------------------------------------------------------------
+
+// `hyprctl` reports available modes as "1920x1080@60.00Hz"; monitors.lua wants
+// "1920x1080@60". Unknown/edge forms are returned unchanged so the UI never
+// silently invents a mode.
+function normalizeMode(raw) {
+  var mode = String(raw || "").trim()
+  if (mode === "" || mode === "preferred" || mode === "highres" || mode === "highrr") return mode
+  var m = mode.match(/^(\d+x\d+@\d+(?:\.\d+)?)Hz$/)
+  if (!m) return mode
+  var parts = m[1].split("@")
+  var hz = Number(parts[1])
+  if (!isFinite(hz)) return m[1]
+  return parts[0] + "@" + String(Math.round(hz * 1000) / 1000)
+}
+
+// Modes suitable for the per-display dropdown.
+function monitorModes(monitor) {
+  var out = []
+  var seen = {}
+  var raw = monitor && monitor.availableModes instanceof Array ? monitor.availableModes : []
+  for (var i = 0; i < raw.length; i++) {
+    var mode = normalizeMode(raw[i])
+    if (mode !== "" && seen[mode] === undefined) { seen[mode] = true; out.push(mode) }
+  }
+  return out
+}
+
+// Parse `display_config.py rules` JSON into a safe shape.
+function parseDisplayRules(raw) {
+  var result = { ok: false, config: "", rules: [], error: "" }
+  try {
+    var d = JSON.parse(String(raw || ""))
+    if (!d || typeof d !== "object") return result
+    result.ok = d.ok === true
+    result.config = String(d.config || "")
+    result.error = String(d.error || "")
+    var rules = d.rules instanceof Array ? d.rules : []
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i] || {}
+      var fields = {}
+      var f = r.fields && typeof r.fields === "object" ? r.fields : {}
+      for (var key in f) {
+        if (Object.prototype.hasOwnProperty.call(f, key)) fields[key] = f[key]
+      }
+      result.rules.push({
+        output: String(r.output || fields.output || ""),
+        fields: fields,
+        nonLiteral: r.nonLiteral instanceof Array ? r.nonLiteral.map(String) : []
+      })
+    }
+  } catch (e) {
+    console.warn("omascreencast: parseDisplayRules failed: " + e)
+  }
+  return result
+}
+
+// Stable persistence selector, mirroring display_config.py.
+function monitorSelector(monitor) {
+  if (!monitor) return ""
+  var description = String(monitor.description || "").trim()
+  if (description !== "") return "desc:" + description
+  return String(monitor.name || "")
+}
+
+// Find the persisted rule for a monitor (by name or desc: selector).
+function displayRuleFor(monitor, rules) {
+  if (!monitor) return null
+  var name = String(monitor.name || "")
+  var selector = monitorSelector(monitor)
+  var list = rules instanceof Array ? rules : []
+  for (var i = 0; i < list.length; i++) {
+    var output = String(list[i].output || "")
+    if (output !== "" && (output === name || output === selector)) return list[i]
+  }
+  return null
+}
+
+// The mode Hyprland is currently using, mapped onto an advertised mode string
+// when possible ("1920x1080@60.00Hz" -> "1920x1080@60").
+function currentMode(monitor) {
+  var modes = monitorModes(monitor)
+  var width = Number(monitor && monitor.width || 0)
+  var height = Number(monitor && monitor.height || 0)
+  var hz = Number(monitor && monitor.refreshRate || 60)
+  for (var i = 0; i < modes.length; i++) {
+    var m = modes[i].match(/^(\d+)x(\d+)@(\d+(?:\.\d+)?)$/)
+    if (!m) continue
+    if (Number(m[1]) === width && Number(m[2]) === height
+        && Math.abs(Number(m[3]) - hz) < 0.5) return modes[i]
+  }
+  if (width > 0 && height > 0)
+    return String(width) + "x" + String(height) + "@"
+      + String(Math.round(hz * 1000) / 1000)
+  return ""
+}
+
+// Effective literal fields for a monitor. Live `hyprctl` state is authoritative
+// (so an ephemeral Apply is reflected when the user then drags the display);
+// the persisted rule only supplies a fallback when hyprctl omits a value.
+function displayFieldsFor(monitor, rules) {
+  if (!monitor) return {}
+  var rule = displayRuleFor(monitor, rules)
+  var fields = rule && rule.fields ? rule.fields : {}
+  var mirror = String(monitor.mirrorOf || "none")
+  return {
+    mode: currentMode(monitor) || String(fields.mode || "preferred"),
+    position: String(monitor.x || 0) + "x" + String(monitor.y || 0),
+    scale: Number(monitor.scale || fields.scale || 1),
+    transform: Number(monitor.transform || 0),
+    disabled: monitor.disabled === true,
+    mirror: mirror === "none" ? "" : mirror
+  }
+}
+
+function transformLabel(transform) {
+  var t = Number(transform || 0)
+  if (t === 1) return "90°"
+  if (t === 2) return "180°"
+  if (t === 3) return "270°"
+  return "Normal"
+}
+
+// Logical width/height (layout pixels) for canvas geometry.
+function monitorLogicalSize(monitor) {
+  var scale = Number(monitor && monitor.scale || 1)
+  if (!isFinite(scale) || scale <= 0) scale = 1
+  var width = Math.round(Number(monitor && monitor.width || 0) / scale)
+  var height = Math.round(Number(monitor && monitor.height || 0) / scale)
+  // 90°/270° transforms swap the logical axes; canvas bounds, overlap and
+  // snapping must use the rotated rectangle.
+  var transform = Number(monitor && monitor.transform || 0)
+  if (transform % 2 === 1) {
+    var swapped = width
+    width = height
+    height = swapped
+  }
+  return { width: width, height: height }
+}
+
+// Bounding box of the current (or previewed) layout.
+function arrangementBounds(monitors) {
+  var list = monitors instanceof Array ? monitors : []
+  if (list.length === 0) return { minX: 0, minY: 0, maxX: 1, maxY: 1, width: 1, height: 1 }
+  var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (var i = 0; i < list.length; i++) {
+    var size = monitorLogicalSize(list[i])
+    var x = Number(list[i].x || 0)
+    var y = Number(list[i].y || 0)
+    minX = Math.min(minX, x)
+    minY = Math.min(minY, y)
+    maxX = Math.max(maxX, x + size.width)
+    maxY = Math.max(maxY, y + size.height)
+  }
+  return {
+    minX: minX, minY: minY, maxX: maxX, maxY: maxY,
+    width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY)
+  }
+}
+
+// Names of displays whose logical rectangles overlap (arrangement warning).
+function overlappingDisplays(monitors) {
+  var list = monitors instanceof Array ? monitors : []
+  var pairs = []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].disabled === true) continue
+    var a = monitorLogicalSize(list[i])
+    for (var j = i + 1; j < list.length; j++) {
+      if (list[j].disabled === true) continue
+      var b = monitorLogicalSize(list[j])
+      var ax = Number(list[i].x || 0), ay = Number(list[i].y || 0)
+      var bx = Number(list[j].x || 0), by = Number(list[j].y || 0)
+      if (ax < bx + b.width && bx < ax + a.width && ay < by + b.height && by < ay + a.height)
+        pairs.push([String(list[i].name || ""), String(list[j].name || "")])
+    }
+  }
+  return pairs
+}
+
+// Snap a dragged display's top-left to another display's edges.
+function snapPosition(monitor, x, y, monitors, threshold) {
+  var list = monitors instanceof Array ? monitors : []
+  var limit = Number(threshold || 16)
+  var size = monitorLogicalSize(monitor)
+  var bestX = Number(x), bestY = Number(y)
+  var bestDx = limit + 1, bestDy = limit + 1
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] === monitor || String(list[i].name) === String(monitor && monitor.name)) continue
+    var other = monitorLogicalSize(list[i])
+    var ox = Number(list[i].x || 0), oy = Number(list[i].y || 0)
+    var xCandidates = [ox, ox + other.width, ox - size.width]
+    var yCandidates = [oy, oy + other.height, oy - size.height]
+    for (var a = 0; a < xCandidates.length; a++) {
+      var dx = Math.abs(Number(x) - xCandidates[a])
+      if (dx <= limit && dx < bestDx) { bestDx = dx; bestX = xCandidates[a] }
+    }
+    for (var b = 0; b < yCandidates.length; b++) {
+      var dy = Math.abs(Number(y) - yCandidates[b])
+      if (dy <= limit && dy < bestDy) { bestDy = dy; bestY = yCandidates[b] }
+    }
+  }
+  return { x: Math.round(bestX), y: Math.round(bestY) }
+}
+
+// JSON payload handed to display_config.py apply/save.
+function displayRulePayload(monitor, fields) {
+  var f = fields || {}
+  return {
+    name: String(monitor && monitor.name || ""),
+    description: String(monitor && monitor.description || ""),
+    mode: String(f.mode || ""),
+    position: String(f.position || ""),
+    scale: Number(f.scale !== undefined ? f.scale : 1),
+    transform: Number(f.transform || 0),
+    disabled: f.disabled === true,
+    mirror: String(f.mirror || "")
+  }
 }

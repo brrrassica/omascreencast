@@ -33,6 +33,7 @@ Item {
   readonly property string castEngine: scriptsDir + "/cast_engine.py"
   readonly property string bootstrap: scriptsDir + "/bootstrap.py"
   readonly property string sessionScript: scriptsDir + "/session.py"
+  readonly property string displayScript: scriptsDir + "/display_config.py"
 
   // --- shared state (read by Panel.qml) ---
   property var monitors: []
@@ -44,6 +45,16 @@ Item {
   property var activeSession: null
   property var sessionOrphans: []
   property bool sessionBusy: false
+  // Persisted hl.monitor rules (display_config.py) and arranger state (M4).
+  property var displayRules: []
+  property string displayError: ""
+  property bool displayBusy: false
+  // Manually entered receivers survive every watcher snapshot; the engine
+  // cannot discover them over mDNS, so they live beside the discovery list.
+  property var manualDevices: ({})
+  property real lastDiscoveryAt: 0
+  property int discoveryFailures: 0
+  property bool provisioning: false
   // Interpreter the engine should use: system python, or the private venv when
   // the system lacks pychromecast/zeroconf. Resolved by `doctor`.
   property string pythonPath: "python3"
@@ -52,6 +63,8 @@ Item {
   readonly property int deviceCount: devices.length
   readonly property int monitorCount: monitors.length
   readonly property bool depsOk: doctor.ok === true
+  readonly property bool pythonOk: doctor.pythonOk === true
+  readonly property bool pipelineOk: doctor.pipelineOk === true
   readonly property bool casting: activeSession !== null
     && String(activeSession.phase || "") !== "stopped"
 
@@ -61,11 +74,28 @@ Item {
     if (!monitorsProc.running) monitorsProc.running = true
   }
 
+  // Merge manually entered receivers into a watcher snapshot so they do not
+  // vanish when discovery publishes.
+  function mergeManualHosts(list) {
+    var out = list instanceof Array ? list.slice() : []
+    for (var host in manualDevices) {
+      if (!Object.prototype.hasOwnProperty.call(manualDevices, host)) continue
+      var present = false
+      for (var i = 0; i < out.length; i++) {
+        if (String(out[i].host || "") === String(host)) { present = true; break }
+      }
+      if (!present) out.push(manualDevices[host])
+    }
+    return out
+  }
+
   // Restart the long-lived discovery browser to force a fresh sweep. A direct
   // false->true flip races the async process exit, so route the restart
-  // through a one-shot timer once the old browser has actually stopped.
+  // through a one-shot timer once the old browser has actually stopped. Avoid
+  // restarting when the panel merely reopens: that would blank the list.
   function refreshDevices() {
     if (discoveryProc.running) {
+      if (Date.now() - lastDiscoveryAt < 15000) return
       restartDiscovery.pending = true
       discoveryProc.running = false
     } else {
@@ -76,8 +106,27 @@ Item {
   function addManualHost(host) {
     var h = String(host || "").trim()
     if (h === "") return
+    var placeholder = {
+      uuid: "", name: h, host: h, port: 8009, model: "",
+      online: true, codecs: ["h264"]
+    }
+    var copy = {}
+    for (var key in manualDevices) {
+      if (Object.prototype.hasOwnProperty.call(manualDevices, key)) copy[key] = manualDevices[key]
+    }
+    copy[h] = placeholder
+    manualDevices = copy
+    devices = mergeManualHosts(devices)
     manualProc.command = [pythonPath, castEngine, "discovery", "--host", h]
     if (!manualProc.running) manualProc.running = true
+  }
+
+  // Rootless first-run dependency setup (bootstrap.py provision).
+  function provisionDependencies() {
+    if (provisionProc.running) return
+    provisioning = true
+    lastError = ""
+    provisionProc.running = true
   }
 
   function runDoctor() {
@@ -92,6 +141,35 @@ Item {
     statusProc.running = true
   }
 
+  // --- monitor arranger (M4) --------------------------------------------
+  function refreshDisplayRules() {
+    if (displayRulesProc.running) return
+    displayRulesProc.command = [pythonPath, displayScript, "rules"]
+    displayRulesProc.running = true
+  }
+
+  // Ephemeral live apply (hyprctl eval; reverts on logout/restart).
+  function applyDisplayRule(payload) {
+    if (displayBusy || !payload) return
+    displayError = ""
+    displayBusy = true
+    displayApplyProc.command = [
+      pythonPath, displayScript, "apply", "--rule", JSON.stringify(payload)
+    ]
+    displayApplyProc.running = true
+  }
+
+  // Apply and persist into monitors.lua (backed up + atomic).
+  function saveDisplayRule(payload) {
+    if (displayBusy || !payload) return
+    displayError = ""
+    displayBusy = true
+    displaySaveProc.command = [
+      pythonPath, displayScript, "save", "--rule", JSON.stringify(payload)
+    ]
+    displaySaveProc.running = true
+  }
+
   // Compare recorded state with Hyprland reality: cleans stale sessions and
   // reports untracked HEADLESS-* outputs (never removes them automatically).
   function reconcileSession() {
@@ -100,16 +178,21 @@ Item {
     reconcileProc.running = true
   }
 
-  function connectDevice(device) {
+  function connectDevice(device, options) {
     if (!device || sessionBusy) return
     if (casting) {
       lastError = "Disconnect the active session first"
       return
     }
+    var opts = options || {}
     var cmd = [pythonPath, sessionScript, "create"]
     if (device.uuid) cmd.push("--device", String(device.uuid))
     if (device.host) cmd.push("--host", String(device.host))
     if (device.name) cmd.push("--device-name", String(device.name))
+    if (opts.res) cmd.push("--res", String(opts.res))
+    if (opts.fps) cmd.push("--fps", String(opts.fps))
+    if (opts.bitrate) cmd.push("--bitrate", String(opts.bitrate))
+    if (opts.codec) cmd.push("--codec", String(opts.codec))
     lastError = ""
     sessionBusy = true
     createProc.command = cmd
@@ -134,8 +217,10 @@ Item {
 
   function startDiscovery() {
     if (discoveryProc.running || !ready) return
-    if (!depsOk) {
-      lastError = "Missing dependencies — open Doctor"
+    // Discovery only needs the Python modules; capture binaries are required
+    // later, at cast time.
+    if (!pythonOk) {
+      lastError = "Missing Python dependencies — open Doctor"
       return
     }
     discovering = true
@@ -145,6 +230,7 @@ Item {
 
   Component.onCompleted: {
     refreshMonitors()
+    refreshDisplayRules()
     runDoctor()
     reconcileSession()
   }
@@ -160,14 +246,39 @@ Item {
         root.doctor = d
         if (d.python) root.pythonPath = d.python
         root.ready = true
-        if (d.ok) {
+        if (d.pythonOk) {
           root.lastError = ""
           root.startDiscovery()
         } else {
-          root.lastError = "Missing dependencies — open Doctor"
+          root.lastError = "Missing Python dependencies — open Doctor"
         }
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+  }
+
+  // --- rootless dependency provisioning --------------------------------
+  Process {
+    id: provisionProc
+    command: ["python3", root.bootstrap, "provision"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.provisioning = false
+        root.runDoctor()
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.provisioning = false
+        if (text.trim() !== "") root.lastError = text.trim()
+      }
+    }
+    onExited: root.provisioning = false
   }
 
   // --- long-lived discovery browser (incremental JSONL snapshots) --------
@@ -177,21 +288,39 @@ Item {
       onRead: function(line) {
         var ev = Model.parseDiscoveryEvent(line)
         if (ev.type === "discovery") {
-          root.devices = ev.devices
-          root.discovering = false
+          root.lastDiscoveryAt = Date.now()
+          if (!ev.browsing) root.discoveryFailures = 0
+          root.devices = root.mergeManualHosts(ev.devices)
+          root.discovering = ev.browsing
         } else if (ev.type === "phase" && ev.phase === "error") {
           root.lastError = ev.detail
+          root.discoveryFailures = root.discoveryFailures + 1
           root.discovering = false
         }
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
     }
     onExited: {
       root.discovering = false
       if (restartDiscovery.pending) {
         restartDiscovery.pending = false
         restartDiscovery.restart()
+      } else if (root.ready && root.pythonOk && root.discoveryFailures < 5
+                 && root.discoveryFailures > 0) {
+        root.discoveryRetry.interval = Math.min(
+          60000, 5000 * Math.pow(2, root.discoveryFailures - 1))
+        root.discoveryRetry.restart()
       }
     }
+  }
+
+  Timer {
+    id: discoveryRetry
+    repeat: false
+    onTriggered: root.startDiscovery()
   }
 
   Timer {
@@ -210,17 +339,22 @@ Item {
       onStreamFinished: {
         var ev = Model.parseDiscoveryEvent(text)
         if (ev.devices.length === 0) return
-        var merged = root.devices.slice()
-        for (var i = 0; i < ev.devices.length; i++) {
-          var d = ev.devices[i]
-          var exists = false
-          for (var j = 0; j < merged.length; j++) {
-            if (merged[j].host === d.host) { exists = true; break }
-          }
-          if (!exists) merged.push(d)
+        var copy = {}
+        for (var key in root.manualDevices) {
+          if (Object.prototype.hasOwnProperty.call(root.manualDevices, key))
+            copy[key] = root.manualDevices[key]
         }
-        root.devices = merged
+        for (var i = 0; i < ev.devices.length; i++) {
+          var host = String(ev.devices[i].host || "").trim()
+          if (host !== "") copy[host] = ev.devices[i]
+        }
+        root.manualDevices = copy
+        root.devices = root.mergeManualHosts(root.devices)
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
     }
   }
 
@@ -234,10 +368,19 @@ Item {
         var r = Model.parseSession(text)
         if (!r.ok) return
         root.activeSession = r.active
-        // A stopped session is stale state: converge automatically.
-        if (r.active && String(r.active.phase || "") === "stopped")
+        if (!r.active) return
+        var phase = String(r.active.phase || "")
+        // A finished cast leaves phase "stopped"; a crashed engine leaves a
+        // dead pid or a vanished output. Both converge automatically.
+        if (phase === "stopped"
+            || ((phase === "starting" || phase === "casting")
+                && (r.alive === false || r.outputPresent === false)))
           root.reconcileSession()
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
     }
   }
 
@@ -252,6 +395,10 @@ Item {
         if (!r.ok && r.error !== "") root.lastError = r.error
         if (r.cleaned) root.refreshMonitors()
       }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
     }
   }
 
@@ -272,6 +419,11 @@ Item {
         root.refreshSession()
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+    onExited: if (root.sessionBusy) root.sessionBusy = false
   }
 
   Process {
@@ -291,6 +443,11 @@ Item {
         root.reconcileSession()
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+    onExited: if (root.sessionBusy) root.sessionBusy = false
   }
 
   Process {
@@ -305,6 +462,70 @@ Item {
         root.reconcileSession()
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+    onExited: if (root.sessionBusy) root.sessionBusy = false
+  }
+
+  // --- monitor arranger (M4) --------------------------------------------
+  Process {
+    id: displayRulesProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseDisplayRules(text)
+        if (r.ok) {
+          root.displayRules = r.rules
+          if (root.displayError !== "" && r.error === "") root.displayError = ""
+        } else if (r.error !== "") {
+          root.displayError = r.error
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.displayError = text.trim()
+    }
+  }
+
+  Process {
+    id: displayApplyProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseDisplayRules(text)
+        root.displayBusy = false
+        if (!r.ok) root.displayError = r.error !== "" ? r.error : "Could not apply the display layout"
+        root.refreshMonitors()
+        root.refreshDisplayRules()
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.displayError = text.trim()
+    }
+    onExited: if (root.displayBusy) root.displayBusy = false
+  }
+
+  Process {
+    id: displaySaveProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseDisplayRules(text)
+        root.displayBusy = false
+        if (!r.ok) root.displayError = r.error !== "" ? r.error : "Could not save the display layout"
+        root.refreshMonitors()
+        root.refreshDisplayRules()
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.displayError = text.trim()
+    }
+    onExited: if (root.displayBusy) root.displayBusy = false
   }
 
   // --- display enumeration ----------------------------------------------

@@ -139,6 +139,52 @@ class NamingAndGeometryTest(_TempPaths):
             self.session.apply_arrangement("HEADLESS-1", "1920x1080@60", "0x0", 0)
 
 
+class ApplyArrangementTest(_TempPaths):
+    def test_eval_error_message_is_a_failure_even_with_exit_zero(self):
+        class Result:
+            returncode = 0
+            stdout = "error: unknown monitor"
+            stderr = ""
+
+        self.session._run = lambda command, timeout=5: Result()
+        with self.assertRaises(self.session.SessionError):
+            self.session.apply_arrangement("HEADLESS-1", "1920x1080@60", "0x0")
+
+
+class StatusTest(_TempPaths):
+    def test_status_reports_liveness_and_output(self):
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "pid": 123, "phase": "casting",
+        }})
+        self.session.pid_alive = lambda pid: True
+        self.session.list_monitors = lambda: [{"name": "HEADLESS-1"}]
+        payload = self.emit_command(self.session.cmd_status, argparse.Namespace())
+        self.assertTrue(payload["alive"])
+        self.assertTrue(payload["outputPresent"])
+
+    def test_status_reports_dead_pid(self):
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "pid": 123, "phase": "casting",
+        }})
+        self.session.pid_alive = lambda pid: False
+        self.session.list_monitors = lambda: [{"name": "HEADLESS-1"}]
+        payload = self.emit_command(self.session.cmd_status, argparse.Namespace())
+        self.assertFalse(payload["alive"])
+
+
+class CleanupTest(_TempPaths):
+    def test_cleanup_stops_the_matching_stream_process(self):
+        stopped = []
+        self.session.list_monitors = lambda: [{"name": "HEADLESS-7"}]
+        self.session.remove_output = lambda name: None
+        self.session.find_stream_processes = lambda name: [777]
+        self.session.stop_process = lambda pid, timeout=6.0: stopped.append(pid) or True
+        payload = self.emit_command(
+            self.session.cmd_cleanup, argparse.Namespace(name="HEADLESS-7"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(stopped, [777])
+
+
 class StreamCommandTest(_TempPaths):
     def test_device_command(self):
         cmd = self.session.stream_command(

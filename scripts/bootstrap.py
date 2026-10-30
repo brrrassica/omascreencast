@@ -25,7 +25,9 @@ import sys
 from pathlib import Path
 
 REQUIRED_PY = ("pychromecast", "zeroconf")
-REQUIRED_BIN = ("hyprctl", "wf-recorder", "ffmpeg")
+REQUIRED_BIN = ("hyprctl", "ffmpeg")
+# Either capture tool is enough; the engine prefers wl-screenrec when present.
+CAPTURE_BIN = ("wl-screenrec", "wf-recorder")
 STATE_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "omascreencast"
 VENV_DIR = STATE_DIR / "venv"
 
@@ -42,14 +44,25 @@ def _has_module(name: str) -> bool:
         return False
 
 
+def _capture_backend() -> str:
+    for name in CAPTURE_BIN:
+        if _which(name):
+            return name
+    return ""
+
+
 def check() -> dict:
     """Report dependency status without changing anything."""
     missing_bin = [b for b in REQUIRED_BIN if not _which(b)]
+    capture = _capture_backend()
+    if not capture:
+        missing_bin.append("wl-screenrec or wf-recorder")
     missing_py = [m for m in REQUIRED_PY if not _has_module(m)]
     return {
         "ok": not missing_bin and not missing_py,
         "missingBinaries": missing_bin,
         "missingPython": missing_py,
+        "captureBackend": capture,
         "venv": str(VENV_DIR),
         "venvExists": VENV_DIR.exists(),
     }
@@ -107,17 +120,28 @@ def doctor() -> dict:
     python, or the private venv when it already has the modules), the exact
     firewall rule for the stream port, and the repo-install fast path. It never
     installs anything and never invokes sudo.
+
+    ``pythonOk`` gates discovery only (mDNS needs pychromecast/zeroconf), while
+    ``pipelineOk`` additionally requires the capture/encode binaries. The legacy
+    ``ok`` is the conjunction of both for callers that want the whole pipeline.
     """
     missing_bin = [b for b in REQUIRED_BIN if not _which(b)]
+    capture = _capture_backend()
+    if not capture:
+        missing_bin.append("wl-screenrec or wf-recorder")
     missing_py = [m for m in REQUIRED_PY if not _has_module(m)]
     venv_python = _venv_python()
     venv_ready = _venv_has_modules(venv_python)
     python = str(venv_python) if (missing_py and venv_ready) else sys.executable
-    ok = not missing_bin and (not missing_py or venv_ready)
+    python_ok = not missing_py or venv_ready
+    pipeline_ok = not missing_bin
     return {
-        "ok": ok,
+        "ok": python_ok and pipeline_ok,
+        "pythonOk": python_ok,
+        "pipelineOk": pipeline_ok,
         "missingBinaries": missing_bin,
         "missingPython": missing_py,
+        "captureBackend": capture,
         "venv": str(VENV_DIR),
         "venvExists": VENV_DIR.exists(),
         "venvReady": venv_ready,
@@ -139,7 +163,9 @@ def main() -> int:
     else:
         result = provision()
     print(json.dumps(result, separators=(",", ":")))
-    return 0 if result.get("ok") or args.command == "provision" else 1
+    if args.command == "provision":
+        return 0
+    return 0 if result.get("ok") else 1
 
 
 if __name__ == "__main__":

@@ -46,6 +46,12 @@ class BootstrapTest(unittest.TestCase):
         for key in ("ok", "missingBinaries", "missingPython", "venv", "venvExists"):
             self.assertIn(key, status)
 
+    def test_doctor_splits_python_and_pipeline_health(self):
+        bootstrap = _load("bootstrap")
+        report = bootstrap.doctor()
+        for key in ("ok", "pythonOk", "pipelineOk", "python", "firewallRule"):
+            self.assertIn(key, report)
+
 
 class HlsBufferTest(unittest.TestCase):
     def _buffer(self, **kwargs):

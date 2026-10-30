@@ -159,7 +159,10 @@ const mod = { exports: {} };
 const run = new Function("module", "exports", "console", src +
   ";module.exports={parseMonitors,parseDevices,parseDiscoveryEvent,parseDoctor," +
   "deviceLabel,deviceCodecLabel,monitorLabel,parseSession,sessionTargetLabel," +
-  "sessionMatchesDevice,monitorSessionLabel,sessionPhaseLabel};");
+  "sessionMatchesDevice,monitorSessionLabel,sessionPhaseLabel," +
+  "parseDisplayRules,monitorSelector,displayRuleFor,displayFieldsFor,monitorModes," +
+  "normalizeMode,transformLabel,monitorLogicalSize,arrangementBounds," +
+  "overlappingDisplays,snapPosition,displayRulePayload};");
 run(mod, mod.exports, { warn: function() {}, log: console.log });
 const M = mod.exports;
 
@@ -173,6 +176,22 @@ const sess = M.parseSession(JSON.stringify({ ok: true, active: {
   phase: "casting", pid: 42, res: "1920x1080@60", position: "1920x0"
 }}));
 const bogus = M.parseSession("not json");
+const displayRules = M.parseDisplayRules(JSON.stringify({ ok: true, rules: [
+  { output: "eDP-1", fields: { output: "eDP-1", mode: "1920x1080@60", position: "0x0", scale: 1, transform: 0, disabled: false, mirror: "" }, nonLiteral: [] }
+]}));
+const edp = { name: "eDP-1", description: "BOE 0x0A1F", width: 1920, height: 1080, scale: 1,
+  x: 0, y: 0, transform: 0, disabled: false, availableModes: ["1920x1080@60.00Hz", "1280x720@60.00Hz"] };
+const virtual = { name: "HEADLESS-1", width: 1920, height: 1080, scale: 1, x: 1920, y: 0 };
+const dragged = { name: "HEADLESS-1", width: 1920, height: 1080, scale: 1, x: 1932, y: 0 };
+const rotated = { name: "DP-2", width: 1920, height: 1080, scale: 1, x: 0, y: 0, transform: 1 };
+const browsingEvent = M.parseDiscoveryEvent(JSON.stringify({
+  type: "discovery", devices: [], browsing: true
+}));
+const overlap = M.overlappingDisplays([edp, { name: "HEADLESS-2", width: 1920, height: 1080, scale: 1, x: 100, y: 0 }]);
+const snapped = M.snapPosition(virtual, 1932, 0, [edp, virtual], 16);
+const fields = M.displayFieldsFor(edp, displayRules.rules);
+const bounds = M.arrangementBounds([edp, virtual]);
+const payload = M.displayRulePayload(edp, fields);
 process.stdout.write(JSON.stringify({
   monitorCount: monitors.length,
   virtual: monitors.length > 1 ? monitors[1].virtual : false,
@@ -190,7 +209,21 @@ process.stdout.write(JSON.stringify({
   sessionMatches: M.sessionMatchesDevice(sess.active, ev.devices[0]),
   monitorSuffix: monitors.length > 1
     ? M.monitorSessionLabel(monitors[1], sess.active, ev.devices) : "",
-  bogusSessionSafe: bogus.active === null && bogus.ok === false
+  bogusSessionSafe: bogus.active === null && bogus.ok === false,
+  displayRulesOk: displayRules.ok,
+  displaySelector: M.monitorSelector(edp),
+  displayRuleFound: M.displayRuleFor(edp, displayRules.rules) !== null,
+  modes: M.monitorModes(edp),
+  normalizedMode: M.normalizeMode("1920x1080@60.00Hz"),
+  transform: M.transformLabel(3),
+  logicalSize: M.monitorLogicalSize(edp),
+  rotatedSize: M.monitorLogicalSize(rotated),
+  browsing: browsingEvent.browsing,
+  bounds: bounds,
+  overlaps: overlap,
+  snapped: snapped,
+  fields: fields,
+  payload: payload
 }));
 """
 
@@ -222,6 +255,21 @@ class ModelJsTest(unittest.TestCase):
         self.assertTrue(out["sessionMatches"])
         self.assertEqual(out["monitorSuffix"], " → BRAVIA")
         self.assertTrue(out["bogusSessionSafe"])
+        self.assertTrue(out["displayRulesOk"])
+        self.assertEqual(out["displaySelector"], "desc:BOE 0x0A1F")
+        self.assertTrue(out["displayRuleFound"])
+        self.assertEqual(out["modes"], ["1920x1080@60", "1280x720@60"])
+        self.assertEqual(out["normalizedMode"], "1920x1080@60")
+        self.assertEqual(out["transform"], "270°")
+        self.assertEqual(out["logicalSize"], {"width": 1920, "height": 1080})
+        self.assertEqual(out["rotatedSize"], {"width": 1080, "height": 1920})
+        self.assertTrue(out["browsing"])
+        self.assertEqual(out["bounds"]["width"], 3840)
+        self.assertEqual(out["overlaps"], [["eDP-1", "HEADLESS-2"]])
+        self.assertEqual(out["snapped"], {"x": 1920, "y": 0})
+        self.assertEqual(out["fields"]["mode"], "1920x1080@60")
+        self.assertEqual(out["payload"]["description"], "BOE 0x0A1F")
+        self.assertEqual(out["payload"]["scale"], 1)
 
 
 if __name__ == "__main__":
