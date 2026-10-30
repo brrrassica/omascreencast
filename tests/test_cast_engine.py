@@ -284,6 +284,94 @@ class ReceiverDropListenerTest(unittest.TestCase):
         self.assertEqual(drops, ["receiver load failed"])
 
 
+class ForceTakeoverTest(unittest.TestCase):
+    """A native cast app (Spotify) must not swallow the LOAD (Spike M)."""
+
+    def setUp(self):
+        self.cast = _load()
+        self.log = mock.MagicMock()
+
+    class _FakeCast:
+        def __init__(self, app_id, after=None, raises=False):
+            self.app_id = app_id
+            self._after = after
+            self._raises = raises
+            self.started = []
+
+        def start_app(self, app_id):
+            self.started.append(app_id)
+            if self._raises:
+                raise RuntimeError("start_app failed")
+            if self._after is not None:
+                self.app_id = self._after
+
+    def test_already_on_receiver_is_a_noop(self):
+        fake = self._FakeCast(self.cast.MEDIA_RECEIVER_APP)
+        self.assertTrue(self.cast.force_takeover(fake, self.log))
+        self.assertEqual(fake.started, [])
+
+    def test_launches_receiver_and_reports_takeover(self):
+        fake = self._FakeCast("AndroidNativeApp", after=self.cast.MEDIA_RECEIVER_APP)
+        self.assertTrue(self.cast.force_takeover(fake, self.log))
+        self.assertEqual(fake.started, [self.cast.MEDIA_RECEIVER_APP])
+
+    def test_start_app_failure_is_soft(self):
+        fake = self._FakeCast("AndroidNativeApp", raises=True)
+        self.assertFalse(self.cast.force_takeover(fake, self.log))
+
+    def test_timeout_returns_false(self):
+        fake = self._FakeCast("AndroidNativeApp")
+        self.assertFalse(self.cast.force_takeover(fake, self.log, timeout=0))
+
+    def test_uses_the_default_media_receiver_app_id(self):
+        self.assertEqual(self.cast.MEDIA_RECEIVER_APP, "CC1AD845")
+
+
+class WaitForPlaybackTest(unittest.TestCase):
+    """The LOAD is still IDLE when block_until_active returns (Spike M)."""
+
+    def setUp(self):
+        self.cast = _load()
+
+    class _Status:
+        def __init__(self, state, reason=None):
+            self.player_state = state
+            self.idle_reason = reason
+
+    class _FakeMC:
+        def __init__(self, statuses):
+            self._statuses = list(statuses)
+            self._index = 0
+            self._last = None
+
+        @property
+        def status(self):
+            if self._index < len(self._statuses):
+                self._last = self._statuses[self._index]
+                self._index += 1
+            return self._last
+
+    def test_playing_is_success(self):
+        mc = self._FakeMC([self._Status("PLAYING")])
+        self.assertEqual(self.cast.wait_for_playback(mc, timeout=1), "PLAYING")
+
+    def test_buffering_counts_as_started(self):
+        mc = self._FakeMC([self._Status("IDLE"), self._Status("BUFFERING")])
+        self.assertEqual(
+            self.cast.wait_for_playback(mc, timeout=1, poll=0.01), "BUFFERING"
+        )
+
+    def test_idle_error_fails_fast(self):
+        mc = self._FakeMC([self._Status("IDLE", "ERROR")])
+        self.assertEqual(self.cast.wait_for_playback(mc, timeout=5), "IDLE")
+
+    def test_timeout_returns_last_state(self):
+        mc = self._FakeMC([self._Status("IDLE")])
+        self.assertEqual(
+            self.cast.wait_for_playback(mc, timeout=0.05, poll=0.01), "IDLE"
+        )
+
+
 class CastFromHostTest(unittest.TestCase):
     def setUp(self):
         self.cast = _load()

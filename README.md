@@ -9,7 +9,7 @@ resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 
 ![Omascreencast panel: eDP-1 and a virtual HEADLESS-1 output arranged side by side, with a Sony Bravia casting and a Panasonic TV available](preview.png)
 
-> **Status:** v0.1.0. Discovery, the virtual-monitor session (create / remove / reconcile), the
+> **Status:** v0.1.1. Discovery, the virtual-monitor session (create / remove / reconcile), the
 > capture → encode → LL-HLS → Chromecast pipeline, and the monitor arranger (drag, snap,
 > mode/scale/rotation/disable/mirror, persist) are implemented, including a rootless “Set up”
 > dependency action, crash-out reconciliation, guarded layouts, trial/keep/revert arrangement
@@ -32,8 +32,10 @@ resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 
 - **One-way and laggy.** Chromecast is a sink; there is no input path. Measured on a Panasonic
   receiver: **~2 s** glass-to-glass with an LL-HLS-tagged fMP4 playlist (plain HLS was ~4 s; the
-  receiver's buffer dominates). Great for dashboards, terminals, video, and presentations — not for
-  gaming.
+  receiver's buffer dominates). Wired-Ethernet testing confirmed the delay is receiver-side, not
+  Wi-Fi: objective numbers and the subjective clock-comparison method are in
+  [`docs/performance.md`](docs/performance.md). Great for dashboards, terminals, video, and
+  presentations — not for gaming.
 - **No EDID / hotplug.** The TV cannot report modes or wake the compositor; you pick mode and scale.
 - **Cursor appears on the TV** when the virtual output is placed adjacent to a physical one
   (measured); otherwise the pointer is clamped at the edge and cannot reach it.
@@ -204,9 +206,10 @@ scripts/
 tests/                 # unittest suite, headless smoke, captured fixtures
 docs/dependencies.md   # exact packages, provisioning, firewall, runtime state
 docs/marketplace.md    # listing copy, tags/aliases, security baseline checklist
+docs/performance.md    # measured latency/performance, wired vs Wi-Fi, subjective tests
 website/               # static content for omascreencast.alatcerdas.tech
 .github/workflows/     # CI: Python tests + headless pipeline smoke
-CHANGELOG.md           # release notes (v0.1.0)
+CHANGELOG.md           # release notes (v0.1.1)
 SECURITY.md            # privilege model, stream exposure, private reporting
 THIRD_PARTY_NOTICES.md # licenses of runtime dependencies
 plans/                 # local-only roadmap (gitignored)

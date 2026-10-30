@@ -92,6 +92,12 @@ CODEC_MAP = {
 
 HLS_MIME = "application/vnd.apple.mpegurl"
 MP4_MIME = "video/mp4"
+# Chromecast Default Media Receiver. Some TVs expose native apps (Spotify) as
+# the active cast input; while one owns the session a LOAD is swallowed. We
+# launch the DMR explicitly to force the takeover before casting.
+MEDIA_RECEIVER_APP = "CC1AD845"
+RECEIVER_TAKEOVER_TIMEOUT = 5.0
+PLAYBACK_START_TIMEOUT = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +758,58 @@ def _select_cast(casts, device_uuid: str, host: str):
         if host and info.host == host:
             return cast
     return None
+
+
+def force_takeover(cast, log: logging.Logger,
+                   timeout: float = RECEIVER_TAKEOVER_TIMEOUT) -> bool:
+    """Launch the Default Media Receiver, replacing any app holding the session.
+
+    A TV can have a native app (e.g. Spotify's ``AndroidNativeApp``) as the
+    active cast input. In that state a media LOAD never reaches the receiver,
+    so casting silently does nothing. Starting the DMR explicitly forces the
+    takeover; if it fails the caller still attempts the LOAD (best effort).
+    """
+    current = str(getattr(cast, "app_id", "") or "")
+    if current == MEDIA_RECEIVER_APP:
+        return True
+    try:
+        cast.start_app(MEDIA_RECEIVER_APP)
+    except Exception as exc:  # noqa: BLE001 - best effort, never fatal
+        log.warning("could not launch the default media receiver: %s", exc)
+        return False
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while time.monotonic() < deadline:
+        if str(getattr(cast, "app_id", "") or "") == MEDIA_RECEIVER_APP:
+            log.info("took over receiver session (was %s)", current or "none")
+            return True
+        time.sleep(0.1)
+    still = str(getattr(cast, "app_id", "") or "")
+    log.warning("default media receiver did not become active (app=%s)", still or "none")
+    return still == MEDIA_RECEIVER_APP
+
+
+def wait_for_playback(mc, timeout: float = PLAYBACK_START_TIMEOUT,
+                      poll: float = 0.1) -> str:
+    """Wait for the receiver to leave IDLE and actually start the stream.
+
+    ``block_until_active`` only waits for the receiver *app* to load, not for
+    the media. On the Panasonic the LOAD is still IDLE at that point, so the
+    stream used to abort before the first segment was fetched. Poll the player
+    state instead and treat BUFFERING as success (PLAYING follows).
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    interval = max(0.01, float(poll))
+    state = str(getattr(getattr(mc, "status", None), "player_state", "") or "")
+    while time.monotonic() < deadline:
+        status = getattr(mc, "status", None)
+        state = str(getattr(status, "player_state", "") or "")
+        if state in ("PLAYING", "BUFFERING"):
+            return state
+        reason = str(getattr(status, "idle_reason", "") or "").upper()
+        if state == "IDLE" and reason == "ERROR":
+            return state
+        time.sleep(interval)
+    return state
 
 
 def _cast_from_host(host: str, log: logging.Logger, uuid: str = "",
@@ -1435,11 +1493,9 @@ def cmd_stream(args: argparse.Namespace) -> int:
 
         emit({"type": "phase", "phase": "discovering", "detail": "locating receiver"})
         cast = None
-        casts, browser = pychromecast.get_chromecasts(timeout=10)
-        cast = _select_cast(casts, args.device, args.host)
-        if cast is None and args.host:
-            # mDNS-blocked / cross-VLAN fallback: connect straight to the IP
-            # rather than requiring discovery to see the receiver (R6).
+        if args.host:
+            # A manual IP must not pay the fixed mDNS browse timeout (10 s).
+            # Connect directly first; discovery is only a fallback (R6).
             try:
                 cast = _cast_from_host(
                     args.host, log, uuid=args.device,
@@ -1447,7 +1503,10 @@ def cmd_stream(args: argparse.Namespace) -> int:
                     model=str(device_info.get("model") or ""),
                 )
             except Exception as exc:  # noqa: BLE001
-                log.error("direct connect to %s failed: %s", args.host, exc)
+                log.warning("direct connect to %s failed: %s", args.host, exc)
+        if cast is None:
+            casts, browser = pychromecast.get_chromecasts(timeout=10)
+            cast = _select_cast(casts, args.device, args.host)
         if cast is None:
             log.error("receiver not found device=%s host=%s", args.device, args.host)
             emit({"type": "phase", "phase": "error", "detail": "receiver not found"})
@@ -1457,6 +1516,11 @@ def cmd_stream(args: argparse.Namespace) -> int:
             cast.wait(timeout=10)
         except TypeError:  # older pychromecast: no timeout argument
             cast.wait()
+        # Force the Default Media Receiver to the foreground. Without this a
+        # native app (Spotify et al.) keeps the session and play_media is
+        # silently ignored.
+        if not force_takeover(cast, log):
+            log.warning("receiver takeover failed; sending LOAD anyway")
         mc = cast.media_controller
         drop: dict[str, str] = {}
         drop_seen = threading.Event()
@@ -1473,12 +1537,8 @@ def cmd_stream(args: argparse.Namespace) -> int:
             log.debug("register_status_listener: %s", exc)
 
         mc.play_media(url, HLS_MIME)
-        try:
-            mc.block_until_active(timeout=20)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("block_until_active: %s", exc)
-        state = str(getattr(getattr(mc, "status", None), "player_state", "") or "")
-        if state and state not in ("PLAYING", "BUFFERING"):
+        state = wait_for_playback(mc, timeout=PLAYBACK_START_TIMEOUT)
+        if state not in ("PLAYING", "BUFFERING"):
             log.error("receiver did not start playback (state=%s)", state)
             emit({
                 "type": "phase", "phase": "error",

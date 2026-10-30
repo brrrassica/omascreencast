@@ -4,6 +4,27 @@ All notable changes to omascreencast are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-10-30
+
+Latency and performance release.
+
+### Added
+
+- **Tracked performance report.** [`docs/performance.md`](docs/performance.md) records the
+ wired-Ethernet re-measurement (0.37 ms RTT, TTFF, fetch cadence), the LL-HLS-vs-plain-fMP4
+ comparison, and the subjective glass-to-glass observations and method.
+
+### Fixed
+
+- **Cast takeover.** A native receiver app (e.g. Spotify) could own the cast
+ session and silently swallow the media `LOAD`. The engine now launches the
+ Chromecast Default Media Receiver (`CC1AD845`) before casting.
+- **Startup aborted during `LOAD`.** `block_until_active()` only waits for the
+ receiver app, not the media; the engine treated the initial `IDLE` as a
+ failure. It now waits for `PLAYING`/`BUFFERING`.
+- **10 s mDNS penalty with a manual IP.** `--host` connects directly first;
+ discovery is only a fallback.
+
 ## [0.1.0] — 2026-10-30
 
 First public release. A Chromecast-capable TV becomes an arrangeable Hyprland
