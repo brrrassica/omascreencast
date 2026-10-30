@@ -15,15 +15,21 @@ resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 - **Virtual network monitor** — a `HEADLESS-*` output enumerated by Hyprland and streamed to your TV.
 - **Monitor arranger** — position, resolution, scale, orientation, enable/disable, and mirror for all
   displays, virtual ones included.
-- **Rootless** — everything runs as your user. No `sudo`, no systemd unit, no firewall changes.
+- **Rootless** — everything runs as your user. No `sudo`, no systemd unit. Casting needs one inbound
+  firewall rule for the local stream port (or an already-open port); see Honest limitations.
 - **Standard install** — a plain Omarchy plugin: clone, validate, enable.
 
 ## Honest limitations
 
-- **One-way and laggy.** Chromecast is a sink; there is no input path. Expect roughly 250 ms–2 s of latency.
-  Great for dashboards, terminals, video, and presentations — not for gaming.
+- **One-way and laggy.** Chromecast is a sink; there is no input path. Measured on a Panasonic
+  receiver: **~2 s** glass-to-glass with an LL-HLS-tagged fMP4 playlist (plain HLS was ~4 s; the
+  receiver's buffer dominates). Great for dashboards, terminals, video, and presentations — not for
+  gaming.
 - **No EDID / hotplug.** The TV cannot report modes or wake the compositor; you pick mode and scale.
-- **Cursor does not enter the TV.** The virtual output is a real desktop region you drive from the laptop.
+- **Cursor appears on the TV** when the virtual output is placed adjacent to a physical one
+  (measured); otherwise the pointer is clamped at the edge and cannot reach it.
+- **One inbound firewall rule is required** for the local stream port (or reuse an already-open
+  port), so the receiver can fetch the stream from your machine.
 - **Video only in v0.1.0.** Audio arrives in v0.1.x.
 - **Chromecast only in v0.1.0.** Miracast/WFD and DLNA are out of scope.
 
