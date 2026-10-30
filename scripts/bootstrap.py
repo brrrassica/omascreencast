@@ -75,7 +75,13 @@ def _which(executable: str) -> str | None:
 
 
 def provision() -> dict:
-    """Create/refresh the private venv when system packages are unavailable."""
+    """Create/refresh the private venv when system packages are unavailable.
+
+    Returns the *post-install* doctor report (not the pre-install status), so a
+    caller driving the panel's "Set up" action sees ``ok``/``venvExists``/
+    ``python`` reflect the newly provisioned venv instead of the missing system
+    packages that triggered the install (Spike G).
+    """
     status = check()
     if not status["missingPython"]:
         status["provisioned"] = False
@@ -90,9 +96,10 @@ def provision() -> dict:
         [str(pip), "install", "--upgrade", "pychromecast", "zeroconf"],
         check=True,
     )
-    status["provisioned"] = True
-    status["reason"] = "installed into private venv"
-    return status
+    report = doctor()
+    report["provisioned"] = True
+    report["reason"] = "installed into private venv"
+    return report
 
 
 def _venv_python() -> Path:

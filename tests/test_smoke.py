@@ -52,6 +52,34 @@ class BootstrapTest(unittest.TestCase):
         for key in ("ok", "pythonOk", "pipelineOk", "python", "firewallRule"):
             self.assertIn(key, report)
 
+    def test_provision_reports_post_install_status(self):
+        import tempfile
+        from unittest import mock
+
+        bootstrap = _load("bootstrap")
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = Path(tmp) / "venv"
+            with mock.patch.object(bootstrap, "STATE_DIR", Path(tmp)), \
+                    mock.patch.object(bootstrap, "VENV_DIR", venv), \
+                    mock.patch.object(bootstrap, "check", return_value={
+                        "ok": False,
+                        "missingPython": ["pychromecast"],
+                        "venvExists": False,
+                    }), \
+                    mock.patch.object(bootstrap, "doctor", return_value={
+                        "ok": True,
+                        "venvExists": True,
+                        "python": str(venv / "bin" / "python"),
+                    }), \
+                    mock.patch.object(bootstrap.subprocess, "run") as run:
+                result = bootstrap.provision()
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1].args[0][0], str(venv / "bin" / "pip"))
+        self.assertTrue(result["provisioned"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["venvExists"])
+
 
 class HlsBufferTest(unittest.TestCase):
     def _buffer(self, **kwargs):
