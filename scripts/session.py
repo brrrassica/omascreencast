@@ -62,7 +62,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CAST_ENGINE = SCRIPT_DIR / "cast_engine.py"
 
 HEADLESS_PREFIX = "HEADLESS-"
-PREFERRED_MODE = "1920x1080@60"  # the only mode a Hyprland headless output offers
+# `hyprctl` lists only 1920x1080@60 in availableModes, but the headless backend
+# accepts other modes via hl.monitor (Spike D: 1600x900, 1280x720, 1024x768).
+PREFERRED_MODE = "1920x1080@60"
 DEFAULT_RES = PREFERRED_MODE
 DEFAULT_PORT = 7236
 DEFAULT_FPS = 30

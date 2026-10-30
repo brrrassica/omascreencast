@@ -271,11 +271,23 @@ function normalizeMode(raw) {
   return parts[0] + "@" + String(Math.round(hz * 1000) / 1000)
 }
 
+// Hyprland's headless backend accepts arbitrary modes even though `hyprctl`
+// lists only the native 1920x1080@60 in `availableModes` (Spike D). Offer the
+// known-good modes for virtual outputs in addition to whatever hyprctl reports;
+// physical displays keep using only their reported modes.
+var VIRTUAL_MODE_FALLBACKS = ["1920x1080@60", "1600x900@60", "1280x720@60"]
+
+function isVirtualMonitor(monitor) {
+  if (!monitor) return false
+  return monitor.virtual === true || String(monitor.name || "").indexOf("HEADLESS") === 0
+}
+
 // Modes suitable for the per-display dropdown.
 function monitorModes(monitor) {
   var out = []
   var seen = {}
   var raw = monitor && monitor.availableModes instanceof Array ? monitor.availableModes : []
+  if (isVirtualMonitor(monitor)) raw = raw.concat(VIRTUAL_MODE_FALLBACKS)
   for (var i = 0; i < raw.length; i++) {
     var mode = normalizeMode(raw[i])
     if (mode !== "" && seen[mode] === undefined) { seen[mode] = true; out.push(mode) }

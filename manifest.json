@@ -43,7 +43,7 @@
         "label": "Virtual monitor resolution",
         "options": ["1920x1080@60", "1600x900@60", "1280x720@60"],
         "defaultValue": "1920x1080@60",
-        "description": "Hyprland headless outputs currently offer 1920x1080@60 (Spike A); other values fall back to it."
+        "description": "The headless backend accepts these modes even though hyprctl lists only 1920x1080@60 (Spike D)."
       },
       {
         "key": "language",

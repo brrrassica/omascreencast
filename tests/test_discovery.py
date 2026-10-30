@@ -214,6 +214,7 @@ process.stdout.write(JSON.stringify({
   displaySelector: M.monitorSelector(edp),
   displayRuleFound: M.displayRuleFor(edp, displayRules.rules) !== null,
   modes: M.monitorModes(edp),
+  virtualModes: M.monitorModes(virtual),
   normalizedMode: M.normalizeMode("1920x1080@60.00Hz"),
   transform: M.transformLabel(3),
   logicalSize: M.monitorLogicalSize(edp),
@@ -259,6 +260,9 @@ class ModelJsTest(unittest.TestCase):
         self.assertEqual(out["displaySelector"], "desc:BOE 0x0A1F")
         self.assertTrue(out["displayRuleFound"])
         self.assertEqual(out["modes"], ["1920x1080@60", "1280x720@60"])
+        # Virtual outputs get the known-good fallbacks even when hyprctl only
+        # reports the native mode (Spike D).
+        self.assertEqual(out["virtualModes"], ["1920x1080@60", "1600x900@60", "1280x720@60"])
         self.assertEqual(out["normalizedMode"], "1920x1080@60")
         self.assertEqual(out["transform"], "270°")
         self.assertEqual(out["logicalSize"], {"width": 1920, "height": 1080})
