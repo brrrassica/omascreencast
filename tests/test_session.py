@@ -54,7 +54,10 @@ class _TempPaths(unittest.TestCase):
 
 class StateFileTest(_TempPaths):
     def test_missing_state_is_empty(self):
-        self.assertEqual(self.session.load(), {"version": 1, "active": None})
+        self.assertEqual(
+            self.session.load(),
+            {"version": 1, "active": None, "ownedOutputs": []},
+        )
 
     def test_roundtrip_and_update_merge(self):
         self.session.save({"version": 1, "active": {"name": "HEADLESS-1", "phase": "starting"}})
@@ -79,6 +82,15 @@ class StateFileTest(_TempPaths):
         self.session.save({"version": 1, "active": {"name": "HEADLESS-1"}})
         self.session.clear_active()
         self.assertIsNone(self.session.load()["active"])
+
+    def test_clear_active_preserves_owned_outputs(self):
+        self.session.save({
+            "version": 1,
+            "active": {"name": "HEADLESS-1"},
+            "ownedOutputs": ["HEADLESS-1", "HEADLESS-2"],
+        })
+        self.session.clear_active(remove_owned="HEADLESS-1")
+        self.assertEqual(self.session.load()["ownedOutputs"], ["HEADLESS-2"])
 
     def test_save_retires_legacy_runtime_file(self):
         self.session.LEGACY_RUNTIME_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -268,9 +280,38 @@ class ReconcileTest(_TempPaths):
         result = self.session.reconcile(
             monitors=[{"name": "eDP-1"}, {"name": "HEADLESS-4"}],
             alive=lambda _pid: True,
+            streams=lambda _name: [],
         )
         self.assertEqual(result["orphans"], ["HEADLESS-4"])
         self.assertFalse(result["cleaned"])
+
+    def test_owned_orphan_is_cleaned(self):
+        self.session.save({
+            "version": 1, "active": None, "ownedOutputs": ["HEADLESS-4"],
+        })
+        removed = []
+        result = self.session.reconcile(
+            monitors=[{"name": "eDP-1"}, {"name": "HEADLESS-4"}],
+            streams=lambda _name: [],
+            remove=removed.append,
+        )
+        self.assertEqual(removed, ["HEADLESS-4"])
+        self.assertEqual(result["cleanedOrphans"], ["HEADLESS-4"])
+        self.assertEqual(result["orphans"], [])
+        self.assertEqual(self.session.load()["ownedOutputs"], [])
+
+    def test_process_backed_orphan_is_stopped_and_removed(self):
+        removed, stopped = [], []
+        result = self.session.reconcile(
+            monitors=[{"name": "eDP-1"}, {"name": "HEADLESS-5"}],
+            streams=lambda name: [777] if name == "HEADLESS-5" else [],
+            stop=stopped.append,
+            remove=removed.append,
+        )
+        self.assertEqual(stopped, [777])
+        self.assertEqual(removed, ["HEADLESS-5"])
+        self.assertEqual(result["cleanedOrphans"], ["HEADLESS-5"])
+        self.assertEqual(result["orphans"], [])
 
     def test_orphans_exclude_the_active_output(self):
         self._active()
@@ -279,6 +320,57 @@ class ReconcileTest(_TempPaths):
             alive=lambda _pid: True,
         )
         self.assertEqual(result["orphans"], ["HEADLESS-2"])
+
+
+class KeepAndTeardownTest(_TempPaths):
+    def test_keep_marks_disconnected_without_removing_output(self):
+        self.session.save({
+            "version": 1,
+            "active": {"name": "HEADLESS-1", "pid": None, "phase": "casting"},
+            "ownedOutputs": ["HEADLESS-1"],
+        })
+        payload = self.emit_command(
+            self.session.cmd_keep, argparse.Namespace())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["kept"])
+        self.assertEqual(payload["active"]["phase"], "disconnected")
+        self.assertEqual(self.session.load()["active"]["name"], "HEADLESS-1")
+        self.assertEqual(self.session.load()["ownedOutputs"], ["HEADLESS-1"])
+
+    def test_teardown_is_idempotent_and_cleans_owned_outputs(self):
+        self.session.save({
+            "version": 1,
+            "active": {"name": "HEADLESS-1", "pid": None, "phase": "casting"},
+            "ownedOutputs": ["HEADLESS-1"],
+        })
+        self.session.list_monitors = lambda: [
+            {"name": "eDP-1"}, {"name": "HEADLESS-1"}, {"name": "HEADLESS-2"},
+        ]
+        self.session.iter_stream_processes = lambda: [(777, "HEADLESS-2")]
+        self.session.pid_alive = lambda _pid: False
+        stopped, removed = [], []
+        self.session.stop_process = lambda pid, timeout=6.0: stopped.append(pid) or True
+        self.session.remove_output = removed.append
+
+        first = self.session.teardown()
+        # Simulate Hyprland having actually dropped the outputs.
+        self.session.list_monitors = lambda: [{"name": "eDP-1"}]
+        self.session.iter_stream_processes = lambda: []
+        second = self.session.teardown()
+        self.assertEqual(sorted(first["removed"]), ["HEADLESS-1", "HEADLESS-2"])
+        self.assertEqual(first["stopped"], [777])
+        self.assertEqual(second["removed"], [])
+        self.assertEqual(self.session.load()["active"], None)
+        self.assertEqual(self.session.load()["ownedOutputs"], [])
+
+    def test_teardown_never_removes_foreign_headless_outputs(self):
+        self.session.list_monitors = lambda: [{"name": "HEADLESS-9"}]
+        self.session.iter_stream_processes = lambda: []
+        removed = []
+        self.session.remove_output = removed.append
+        payload = self.session.teardown()
+        self.assertEqual(payload["removed"], [])
+        self.assertEqual(removed, [])
 
 
 class CreateLifecycleTest(_TempPaths):

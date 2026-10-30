@@ -255,6 +255,35 @@ class HlsBufferBlockingTest(unittest.TestCase):
         self.assertIn("seg4.m4s", buffer)
 
 
+class ReceiverDropListenerTest(unittest.TestCase):
+    def setUp(self):
+        self.cast = _load()
+
+    class _Status:
+        def __init__(self, state):
+            self.player_state = state
+
+    def test_idle_after_playing_reports_one_drop(self):
+        drops = []
+        listener = self.cast._ReceiverDropListener(drops.append)
+        listener.new_media_status(self._Status("PLAYING"))
+        listener.new_media_status(self._Status("IDLE"))
+        listener.new_media_status(self._Status("IDLE"))
+        self.assertEqual(drops, ["receiver idle"])
+
+    def test_idle_before_playing_is_not_a_drop(self):
+        drops = []
+        listener = self.cast._ReceiverDropListener(drops.append)
+        listener.new_media_status(self._Status("IDLE"))
+        self.assertEqual(drops, [])
+
+    def test_load_failure_is_a_drop(self):
+        drops = []
+        listener = self.cast._ReceiverDropListener(drops.append)
+        listener.load_media_failed(None, None)
+        self.assertEqual(drops, ["receiver load failed"])
+
+
 class CastFromHostTest(unittest.TestCase):
     def setUp(self):
         self.cast = _load()

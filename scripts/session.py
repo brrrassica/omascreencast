@@ -19,9 +19,15 @@ Lifecycle
 ``remove``   signal the stream process group, remove the output, clear state.
              Idempotent: removing with no active session succeeds.
 ``reconcile`` compared recorded state against reality: stale sessions whose
-             output or process is gone are cleaned automatically; untracked
-             ``HEADLESS-*`` outputs are only *reported* (never removed) so a
-             user-created output is never destroyed behind their back.
+             output or process is gone are cleaned automatically; outputs in
+             our owned registry (or still targeted by our stream process) are
+             removed too. A genuinely foreign ``HEADLESS-*`` output is only
+             *reported* so a user-created output is never destroyed behind
+             their back.
+``keep``      mark a receiver/network drop as ``disconnected`` while keeping the
+             virtual output (M6 preference).
+``teardown``  idempotently stop every owned stream and remove every owned
+             output; used before plugin removal and exposed over IPC.
 
 Everything here is userspace: ``hyprctl`` and a child Python process only.
 Runtime monitor changes use ``hyprctl eval 'hl.monitor({...})'`` because this
@@ -80,7 +86,28 @@ class SessionError(RuntimeError):
 # State file (single source of truth; atomic writes)
 # ---------------------------------------------------------------------------
 def empty_state() -> dict:
-    return {"version": STATE_VERSION, "active": None}
+    return {"version": STATE_VERSION, "active": None, "ownedOutputs": []}
+
+
+def owned_outputs(state: dict | None = None) -> list[str]:
+    """Outputs this plugin created and may therefore clean up later.
+
+    An untracked ``HEADLESS-*`` output that is not in this registry is only ever
+    reported, never removed: it may belong to the user (M6 guard rail).
+    """
+    source = load() if state is None else state
+    names = source.get("ownedOutputs")
+    if not isinstance(names, list):
+        return []
+    out: list[str] = []
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        if not name.startswith(HEADLESS_PREFIX) or not _NAME_RE.match(name):
+            continue
+        if name not in out:
+            out.append(name)
+    return out
 
 
 def _now() -> str:
@@ -101,6 +128,7 @@ def load() -> dict:
         return empty_state()
     data.setdefault("version", STATE_VERSION)
     data.setdefault("active", None)
+    data.setdefault("ownedOutputs", [])
     return data
 
 
@@ -125,6 +153,7 @@ def _save_unlocked(state: dict) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state.setdefault("version", STATE_VERSION)
     state.setdefault("active", None)
+    state["ownedOutputs"] = owned_outputs(state)
     tmp = STATE_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -155,23 +184,34 @@ def update_active(fields: dict) -> dict | None:
     return active
 
 
-def mark_stopped() -> None:
-    """Mark the session as stopped but keep its name so the output can be removed.
+def mark_stopped(phase: str = "stopped") -> None:
+    """Mark the session terminated but keep its name so the output can be removed.
 
-    Called by ``cast_engine.py`` on teardown. The output is intentionally left in
-    place: ``session.py remove`` or reconciliation owns output removal.
+    Called by ``cast_engine.py`` on teardown. ``phase="disconnected"`` records a
+    receiver/network drop so the service can keep or remove the output per the
+    user's preference (M6). The output is intentionally left in place:
+    ``session.py remove`` or reconciliation owns output removal.
     """
     state = load()
     active = state.get("active")
     if not isinstance(active, dict):
         return
-    active.update({"phase": "stopped", "pid": None, "url": "", "stoppedAt": _now()})
+    active.update({"phase": str(phase or "stopped"), "pid": None, "url": "",
+                   "stoppedAt": _now()})
     state["active"] = active
     save(state)
 
 
-def clear_active() -> None:
-    save(empty_state())
+def clear_active(remove_owned: str = "") -> None:
+    """Clear the active session while preserving the output registry."""
+    state = load()
+    state["active"] = None
+    state["version"] = STATE_VERSION
+    owned = owned_outputs(state)
+    if remove_owned:
+        owned = [name for name in owned if name != remove_owned]
+    state["ownedOutputs"] = owned
+    save(state)
 
 
 # ---------------------------------------------------------------------------
@@ -568,23 +608,31 @@ def reconcile(
     alive=pid_alive,
     stop=stop_process,
     remove=remove_output,
+    streams=None,
 ) -> dict:
-    """Converge recorded state with reality.
+    """Converge recorded state with reality (M6 startup reconciliation).
 
-    ``monitors``/``alive``/``stop``/``remove`` are injectable for tests. Stale
-    sessions are cleaned automatically; untracked headless outputs are reported
-    as ``orphans`` for the panel to offer (never auto-removed).
+    Stale sessions are cleaned automatically. Orphaned ``HEADLESS-*`` outputs
+    we recorded as ours are removed too, and so are outputs still targeted by
+    one of our own ``cast_engine.py stream`` processes (a recorder left behind
+    by a crash before state was written). A genuinely foreign headless output
+    is only reported in ``orphans`` — never removed behind the user's back.
+
+    All collaborators are injectable so the suite runs without Hyprland.
     """
     monitors = list_monitors() if monitors is None else monitors
     names = _monitor_names(monitors)
+    streams = find_stream_processes if streams is None else streams
     state = load()
     active = state.get("active")
+    owned = owned_outputs(state)
     result = {
         "ok": True,
         "cleaned": False,
         "reasons": [],
         "active": None,
         "orphans": [],
+        "cleanedOrphans": [],
     }
 
     if isinstance(active, dict) and active:
@@ -600,23 +648,57 @@ def reconcile(
             reasons.append("cast stopped")
 
         if reasons:
+            removed = True
             if pid and alive(pid):
                 stop(pid)
             if name and name in names:
                 try:
                     remove(name)
                 except SessionError:
-                    pass
-            clear_active()
+                    removed = False
+            if name and removed:
+                owned = [item for item in owned if item != name]
+            state["active"] = None
             result["cleaned"] = True
             result["reasons"] = reasons
         else:
             result["active"] = active
 
     keep = str((result["active"] or {}).get("name") or "")
-    result["orphans"] = sorted(
-        name for name in names if name.startswith(HEADLESS_PREFIX) and name != keep
-    )
+    # Forget names whose output no longer exists; otherwise a later user-created
+    # output that happens to reuse the name could be mistaken for ours.
+    owned = [name for name in owned if name in names or name == keep]
+    orphans: list[str] = []
+    cleaned_orphans: list[str] = []
+    for name in sorted(names):
+        if not name.startswith(HEADLESS_PREFIX) or name == keep:
+            continue
+        try:
+            pids = list(streams(name) or [])
+        except (OSError, SessionError):
+            pids = []
+        if name not in owned and not pids:
+            # Not provably ours: report it for an explicit user action.
+            orphans.append(name)
+            continue
+        for pid in pids:
+            try:
+                stop(pid)
+            except (OSError, SessionError):
+                pass
+        try:
+            remove(name)
+        except SessionError:
+            orphans.append(name)
+            continue
+        cleaned_orphans.append(name)
+        owned = [item for item in owned if item != name]
+
+    state["ownedOutputs"] = owned
+    if result["cleaned"] or cleaned_orphans or state.get("active") is None:
+        save(state)
+    result["orphans"] = orphans
+    result["cleanedOrphans"] = cleaned_orphans
     return result
 
 
@@ -655,8 +737,9 @@ def _create(args: argparse.Namespace) -> int:
             name = existing.get("name") or "a virtual output"
             raise SessionError(f"a session is already active ({name}); run 'remove' first")
         # Stale leftover (crashed shell, stopped cast): clean it before reusing.
+        stale_name = str(existing.get("name") or "")
         _cleanup_active(existing)
-        clear_active()
+        clear_active(remove_owned=stale_name)
 
     monitors = list_monitors()
     name = args.name or next_headless_name(monitors)
@@ -701,7 +784,10 @@ def _create(args: argparse.Namespace) -> int:
             "startedAt": _now(),
             "logOffset": log_offset,
         }
-        save({"version": STATE_VERSION, "active": active})
+        owned = owned_outputs()
+        if created_name not in owned:
+            owned.append(created_name)
+        save({"version": STATE_VERSION, "active": active, "ownedOutputs": owned})
 
         command = stream_command(
             created_name,
@@ -736,7 +822,7 @@ def _create(args: argparse.Namespace) -> int:
                 remove_output(created_name)
             except SessionError:
                 pass
-        clear_active()
+        clear_active(remove_owned=created_name)
         raise
 
 
@@ -758,6 +844,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     name = str(active.get("name") or "")
     pid = active.get("pid")
     warnings: list[str] = []
+    removed = True
 
     if pid and not stop_process(pid):
         warnings.append(f"stream pid {pid} did not exit")
@@ -767,8 +854,11 @@ def cmd_remove(args: argparse.Namespace) -> int:
             remove_output(name)
         except SessionError as exc:
             warnings.append(str(exc))
+            removed = False
 
-    clear_active()
+    # Keep the name in the owned registry when removal failed so the next
+    # reconciliation retries it instead of leaking the output forever.
+    clear_active(remove_owned=name if removed else "")
     payload: dict = {"ok": True, "active": None, "removed": True, "name": name}
     if warnings:
         payload["warnings"] = warnings
@@ -807,10 +897,21 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_keep(args: argparse.Namespace) -> int:
+    """Keep a virtual output after a receiver/network drop (M6 preference)."""
+    active = load().get("active")
+    if not isinstance(active, dict) or not active:
+        _emit({"ok": True, "active": None, "kept": False})
+        return 0
+    mark_stopped("disconnected")
+    _emit({"ok": True, "active": load().get("active"), "kept": True})
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Live phase stream (M5) and hotplug rearrangement
 # ---------------------------------------------------------------------------
-TERMINAL_PHASES = {"idle", "error", "stopped"}
+TERMINAL_PHASES = {"idle", "error", "stopped", "disconnected"}
 
 
 def cmd_events(args: argparse.Namespace) -> int:
@@ -914,9 +1015,18 @@ def cmd_rearrange(args: argparse.Namespace) -> int:
         return 1
 
 
-def find_stream_processes(output: str) -> list[int]:
-    """Find our ``cast_engine.py stream --output <output>`` processes."""
-    found: list[int] = []
+def _argv_output(argv: list[str]) -> str:
+    for index, value in enumerate(argv):
+        if value == "--output" and index + 1 < len(argv):
+            return argv[index + 1]
+        if value.startswith("--output="):
+            return value.split("=", 1)[1]
+    return ""
+
+
+def iter_stream_processes() -> list[tuple[int, str]]:
+    """Return ``(pid, output)`` for every running ``cast_engine.py stream``."""
+    found: list[tuple[int, str]] = []
     proc_root = Path("/proc")
     if not proc_root.is_dir():
         return found
@@ -935,9 +1045,77 @@ def find_stream_processes(output: str) -> list[int]:
             continue
         if "stream" not in argv:
             continue
-        if output in argv or f"--output={output}" in argv:
-            found.append(pid)
+        output = _argv_output(argv)
+        if output:
+            found.append((pid, output))
     return found
+
+
+def find_stream_processes(output: str) -> list[int]:
+    """Find our ``cast_engine.py stream --output <output>`` processes."""
+    return [pid for pid, target in iter_stream_processes() if target == output]
+
+
+def teardown() -> dict:
+    """Idempotently stop every owned stream and remove every owned output (M6).
+
+    This is the manual/plugin-disable path: it does not depend on a live
+    session record. Outputs are only removed when they are in our owned
+    registry or still targeted by one of our stream processes, so a
+    user-created ``HEADLESS-*`` output is never destroyed.
+    """
+    state = load()
+    active = state.get("active")
+    names = set(owned_outputs(state))
+    stopped: list[int] = []
+
+    if isinstance(active, dict) and active:
+        name = str(active.get("name") or "")
+        if name:
+            names.add(name)
+        pid = active.get("pid")
+        if pid and pid_alive(pid) and stop_process(pid):
+            stopped.append(int(pid))
+
+    for pid, output in iter_stream_processes():
+        if not output.startswith(HEADLESS_PREFIX):
+            continue
+        names.add(output)
+        if stop_process(pid):
+            stopped.append(pid)
+
+    try:
+        present = _monitor_names(list_monitors())
+    except SessionError:
+        present = set()
+
+    removed: list[str] = []
+    for name in sorted(names):
+        if name not in present:
+            continue
+        try:
+            remove_output(name)
+            removed.append(name)
+        except SessionError:
+            continue
+
+    # Keep the names whose removal failed so the next reconciliation retries.
+    remaining = sorted(name for name in names if name in present and name not in removed)
+    save({"version": STATE_VERSION, "active": None, "ownedOutputs": remaining})
+    return {
+        "ok": True,
+        "removed": removed,
+        "stopped": sorted(set(stopped)),
+    }
+
+
+def cmd_teardown(args: argparse.Namespace) -> int:
+    try:
+        _emit(teardown())
+        return 0
+    except (SessionError, OSError) as exc:
+        _emit({"ok": False, "error": str(exc), "removed": [], "stopped": []})
+        return 1
 
 
 def cmd_cleanup(args: argparse.Namespace) -> int:
@@ -965,6 +1143,9 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     for pid in find_stream_processes(name):
         if stop_process(pid):
             stopped.append(pid)
+    state = load()
+    state["ownedOutputs"] = [item for item in owned_outputs(state) if item != name]
+    save(state)
     payload: dict = {"ok": True, "removed": True, "name": name}
     if stopped:
         payload["stopped"] = stopped
@@ -982,6 +1163,8 @@ def parse_args() -> argparse.Namespace:
     sub.add_parser("status", help="print the current session state")
     sub.add_parser("reconcile", help="converge state with Hyprland reality")
     sub.add_parser("rearrange", help="place the active virtual output next to the primary display")
+    sub.add_parser("keep", help="keep the virtual output after a receiver/network drop")
+    sub.add_parser("teardown", help="idempotently stop every owned stream and remove its output")
 
     events = sub.add_parser(
         "events", help="follow the active engine's JSONL phase events")
@@ -1019,6 +1202,8 @@ def main() -> int:
         "remove": cmd_remove,
         "reconcile": cmd_reconcile,
         "rearrange": cmd_rearrange,
+        "keep": cmd_keep,
+        "teardown": cmd_teardown,
         "events": cmd_events,
         "cleanup": cmd_cleanup,
     }

@@ -49,6 +49,19 @@ Item {
   property var displayRules: []
   property string displayError: ""
   property bool displayBusy: false
+  // M6 trial/keep/revert: an Apply is provisional until the user keeps it.
+  property var trialLayout: null
+  property int trialRemaining: 0
+  property var pendingRevertPayload: null
+  property int trialSeconds: 15
+  readonly property bool trialActive: trialLayout !== null
+  readonly property int trialRemainingSeconds: trialRemaining
+  // M6 receiver-drop preference: "keep" the virtual output or remove it.
+  property string dropPolicy: "keep"
+  property var pendingReconnectDevice: null
+  property bool handlingDrop: false
+  readonly property bool disconnected: activeSession !== null
+    && String(activePhase) === "disconnected"
   // Manually entered receivers survive every watcher snapshot; the engine
   // cannot discover them over mDNS, so they live beside the discovery list.
   property var manualDevices: ({})
@@ -119,6 +132,7 @@ Item {
     fps = Number(v.fps || 30)
     bitrateMbps = Number(v.bitrateMbps || 6)
     codec = String(v.codec || "auto")
+    dropPolicy = String(v.dropPolicy || "keep")
   }
 
   function connectOptions() {
@@ -236,8 +250,13 @@ Item {
   }
 
   // Ephemeral live apply (hyprctl eval; reverts on logout/restart).
-  function applyDisplayRule(payload) {
-    if (displayBusy || !payload) return
+  function applyDisplayRule(payload, force) {
+    if (!payload) return
+    if (displayApplyProc.running) {
+      if (force) pendingRevertPayload = payload
+      return
+    }
+    if (displayBusy && force !== true) return
     displayError = ""
     displayBusy = true
     displayApplyProc.command = [
@@ -246,9 +265,59 @@ Item {
     displayApplyProc.running = true
   }
 
+  // M6 trial: apply provisionally, then auto-revert unless kept.
+  function beginDisplayTrial(payload) {
+    if (displayBusy || !payload) return
+    var monitor = null
+    for (var i = 0; i < monitors.length; i++) {
+      if (String(monitors[i].name || "") === String(payload.name || "")) {
+        monitor = monitors[i]
+        break
+      }
+    }
+    var previous = monitor
+      ? Model.displayFieldsFor(monitor, displayRules)
+      : {}
+    trialLayout = {
+      name: String(payload.name || ""),
+      description: String(payload.description || ""),
+      previous: previous
+    }
+    trialRemaining = Math.max(3, trialSeconds)
+    displayTrialTimer.restart()
+    applyDisplayRule(payload)
+  }
+
+  function keepDisplayTrial() {
+    if (!trialLayout) return
+    trialLayout = null
+    trialRemaining = 0
+    pendingRevertPayload = null
+    displayTrialTimer.stop()
+    notify(Model.tr(uiLanguage, "layout_kept"), "", "low")
+  }
+
+  function revertDisplayTrial() {
+    if (!trialLayout) return
+    var trial = trialLayout
+    trialLayout = null
+    trialRemaining = 0
+    displayTrialTimer.stop()
+    var fields = trial.previous || {}
+    if (String(fields.mode || "") === "") {
+      notify(Model.tr(uiLanguage, "layout_reverted"), "", "low")
+      return
+    }
+    var payload = Model.displayRulePayload(
+      { name: trial.name, description: trial.description }, fields)
+    applyDisplayRule(payload, true)
+    notify(Model.tr(uiLanguage, "layout_reverted"), "", "low")
+  }
+
   // Apply and persist into monitors.lua (backed up + atomic).
   function saveDisplayRule(payload) {
     if (displayBusy || !payload) return
+    if (trialLayout) keepDisplayTrial()
     displayError = ""
     displayBusy = true
     displaySaveProc.command = [
@@ -294,12 +363,66 @@ Item {
   function disconnect() {
     if (sessionBusy || activeSession === null) return
     reconnectTimer.stop()
+    pendingReconnectDevice = null
+    handlingDrop = false
     reconnectAttempts = 0
     userInitiatedStop = true
     lastError = ""
     sessionBusy = true
     removeProc.command = [pythonPath, sessionScript, "remove"]
     removeProc.running = true
+  }
+
+  // M6: an unexpected receiver/network drop. Keep or remove the virtual output
+  // per the user's preference, and reconnect when opted in.
+  function handleUnexpectedDrop(detail) {
+    var previous = activeSession || {}
+    var device = Model.reconnectDeviceFromSession(previous)
+    var target = Model.sessionTargetLabel(previous, devices)
+    var shouldReconnect = autoReconnect && reconnectAttempts < 3 && device !== null
+    var removeOutput = shouldReconnect || dropPolicy === "remove"
+    var updated = {}
+    for (var key in previous) {
+      if (Object.prototype.hasOwnProperty.call(previous, key)) updated[key] = previous[key]
+    }
+    updated.phase = "disconnected"
+    updated.pid = 0
+    updated.detail = String(detail || "")
+    activeSession = updated
+    eventPhase = "disconnected"
+    stopEvents()
+    handlingDrop = true
+    lastError = ""
+    if (shouldReconnect) {
+      reconnectAttempts = reconnectAttempts + 1
+      pendingReconnectDevice = device
+      notify(Model.tr(uiLanguage, "tv_disconnected"),
+        Model.tr(uiLanguage, "reconnecting_to") + " " + target, "critical")
+      removeProc.command = [pythonPath, sessionScript, "remove"]
+      sessionBusy = true
+      removeProc.running = true
+    } else if (removeOutput) {
+      notify(Model.tr(uiLanguage, "tv_disconnected"),
+        Model.tr(uiLanguage, "monitor_removed"), "critical")
+      removeProc.command = [pythonPath, sessionScript, "remove"]
+      sessionBusy = true
+      removeProc.running = true
+    } else {
+      notify(Model.tr(uiLanguage, "tv_disconnected"),
+        Model.tr(uiLanguage, "monitor_kept"), "normal")
+      keepProc.command = [pythonPath, sessionScript, "keep"]
+      keepProc.running = true
+    }
+  }
+
+  // M6: idempotent teardown for plugin disable/remove or a manual IPC call.
+  function teardownSession() {
+    if (sessionBusy || teardownProc.running) return
+    sessionBusy = true
+    handlingDrop = false
+    pendingReconnectDevice = null
+    teardownProc.command = [pythonPath, sessionScript, "teardown"]
+    teardownProc.running = true
   }
 
   function cleanupOrphan(name) {
@@ -329,6 +452,7 @@ Item {
   // therefore driven by events, not by polling session.json.
   function startEvents() {
     if (eventsProc.running || activeSession === null) return
+    if (String(activeSession.phase || "") === "disconnected") return
     eventPhase = String(activeSession.phase || "")
     eventsProc.command = [pythonPath, sessionScript, "events"]
     eventsProc.running = true
@@ -366,16 +490,25 @@ Item {
       lastError = ev.detail !== "" ? ev.detail : Model.tr(uiLanguage, "cast_failed")
       notify(Model.tr(uiLanguage, "cast_failed"), lastError, "critical")
       Qt.callLater(root.reconcileSession)
+    } else if (ev.phase === "disconnected") {
+      if (userInitiatedStop) {
+        eventPhase = ""
+        activeSession = null
+        refreshMonitors()
+        reconcileSession()
+      } else {
+        handleUnexpectedDrop(ev.detail)
+      }
     } else if (ev.phase === "idle" || ev.phase === "stopped") {
       var wasCasting = prevPhase === "casting" || prevPhase === "starting"
       if (wasCasting && !userInitiatedStop) {
-        notify(Model.tr(uiLanguage, "session_ended"), activeTarget, "low")
-        scheduleReconnect()
+        handleUnexpectedDrop(ev.detail)
+      } else {
+        eventPhase = ""
+        activeSession = null
+        refreshMonitors()
+        reconcileSession()
       }
-      eventPhase = ""
-      activeSession = null
-      refreshMonitors()
-      reconcileSession()
     }
   }
 
@@ -575,6 +708,12 @@ Item {
         var phase = String(r.active.phase || "")
         // A finished cast leaves phase "stopped"; a crashed engine leaves a
         // dead pid or a vanished output. Both converge automatically.
+        if (phase === "disconnected") {
+          root.eventPhase = "disconnected"
+          root.stopEvents()
+          if (r.outputPresent === false) root.reconcileSession()
+          return
+        }
         if (phase === "stopped"
             || ((phase === "starting" || phase === "casting")
                 && (r.alive === false || r.outputPresent === false))) {
@@ -600,8 +739,14 @@ Item {
         root.sessionOrphans = r.orphans
         if (!r.ok && r.error !== "") root.lastError = r.error
         if (r.cleaned) root.refreshMonitors()
-        if (r.active) root.startEvents()
-        else root.eventPhase = ""
+        if (r.active && String(r.active.phase || "") === "disconnected") {
+          root.eventPhase = "disconnected"
+          root.stopEvents()
+        } else if (r.active) {
+          root.startEvents()
+        } else {
+          root.eventPhase = ""
+        }
       }
     }
     stderr: StdioCollector {
@@ -645,15 +790,26 @@ Item {
       onStreamFinished: {
         var r = Model.parseSession(text)
         root.sessionBusy = false
+        var reconnectDevice = root.pendingReconnectDevice
+        var wasDrop = root.handlingDrop
+        root.pendingReconnectDevice = null
+        root.handlingDrop = false
         if (r.ok) {
           root.activeSession = null
           root.eventPhase = ""
           root.stopEvents()
           root.userInitiatedStop = false
-          root.reconnectAttempts = 0
-          root.notify(Model.tr(root.uiLanguage, "disconnected"),
-            root.deviceNickname !== "" ? root.deviceNickname : "Omascreencast", "normal")
+          if (reconnectDevice === null) root.reconnectAttempts = 0
+          if (!wasDrop) {
+            root.notify(Model.tr(root.uiLanguage, "disconnected"),
+              root.deviceNickname !== "" ? root.deviceNickname : "Omascreencast", "normal")
+          }
           if (r.warnings.length > 0) root.lastError = r.warnings.join("; ")
+          if (reconnectDevice !== null) {
+            root.reconnectTimer.device = reconnectDevice
+            root.reconnectTimer.interval = 1000
+            root.reconnectTimer.restart()
+          }
         } else {
           root.lastError = r.error !== "" ? r.error : "Could not stop the session"
           root.notify(Model.tr(root.uiLanguage, "cast_failed"), root.lastError, "critical")
@@ -677,6 +833,54 @@ Item {
         var r = Model.parseSession(text)
         root.sessionBusy = false
         if (!r.ok) root.lastError = r.error !== "" ? r.error : "Could not remove the output"
+        root.refreshMonitors()
+        root.reconcileSession()
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+    onExited: if (root.sessionBusy) root.sessionBusy = false
+  }
+
+  // M6: keep the virtual output after a receiver/network drop.
+  Process {
+    id: keepProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseSession(text)
+        root.handlingDrop = false
+        if (r.ok && r.active) {
+          root.activeSession = r.active
+          root.eventPhase = "disconnected"
+        } else if (r.error !== "") {
+          root.lastError = r.error
+        }
+        root.refreshMonitors()
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+  }
+
+  // M6: idempotent teardown for plugin disable/remove or the IPC surface.
+  Process {
+    id: teardownProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Model.parseSession(text)
+        root.sessionBusy = false
+        if (!r.ok) root.lastError = r.error !== "" ? r.error : "Could not tear down the session"
+        root.activeSession = null
+        root.eventPhase = ""
+        root.stopEvents()
+        root.pendingReconnectDevice = null
+        root.handlingDrop = false
         root.refreshMonitors()
         root.reconcileSession()
       }
@@ -716,9 +920,18 @@ Item {
       onStreamFinished: {
         var r = Model.parseDisplayRules(text)
         root.displayBusy = false
-        if (!r.ok) root.displayError = r.error !== "" ? r.error : "Could not apply the display layout"
+        if (!r.ok) {
+          root.displayError = r.error !== "" ? r.error : "Could not apply the display layout"
+          // A refused/failed trial never took effect, so do not "revert" it.
+          root.trialLayout = null
+          root.trialRemaining = 0
+          displayTrialTimer.stop()
+        }
         root.refreshMonitors()
         root.refreshDisplayRules()
+        var pending = root.pendingRevertPayload
+        root.pendingRevertPayload = null
+        if (pending !== null) root.applyDisplayRule(pending, true)
       }
     }
     stderr: StdioCollector {
@@ -726,6 +939,18 @@ Item {
       onStreamFinished: if (text.trim() !== "") root.displayError = text.trim()
     }
     onExited: if (root.displayBusy) root.displayBusy = false
+  }
+
+  // M6 layout trial countdown (auto-revert when it reaches zero).
+  Timer {
+    id: displayTrialTimer
+    interval: 1000
+    repeat: true
+    onTriggered: {
+      if (!root.trialLayout) return
+      root.trialRemaining = root.trialRemaining - 1
+      if (root.trialRemaining <= 0) root.revertDisplayTrial()
+    }
   }
 
   Process {
@@ -882,6 +1107,11 @@ Item {
       return JSON.stringify({ ok: true, state: "stopping" })
     }
 
+    function teardown(): string {
+      root.teardownSession()
+      return JSON.stringify({ ok: true, state: "tearing-down" })
+    }
+
     function status(): string {
       return JSON.stringify({
         ok: true,
@@ -890,7 +1120,9 @@ Item {
         active: root.activeSession,
         elapsed: root.castElapsedSeconds,
         monitors: root.monitorCount,
-        devices: root.deviceCount
+        devices: root.deviceCount,
+        trial: root.trialActive,
+        dropPolicy: root.dropPolicy
       })
     }
 

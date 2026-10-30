@@ -34,6 +34,7 @@ Panel {
   readonly property string language: setting("language", "auto")
   readonly property string deviceNickname: setting("deviceNickname", "")
   readonly property bool autoReconnect: setting("autoReconnect", false) === true
+  readonly property string dropPolicy: setting("dropPolicy", "keep")
   readonly property string uiLanguage: language === "auto" ? "en" : language
 
   // Tunables handed to session.py create (M3).
@@ -56,7 +57,8 @@ Panel {
       audio: root.audio,
       language: root.language,
       deviceNickname: root.deviceNickname,
-      autoReconnect: root.autoReconnect
+      autoReconnect: root.autoReconnect,
+      dropPolicy: root.dropPolicy
     }
   }
 
@@ -106,6 +108,10 @@ Panel {
   readonly property bool sessionBusy: service ? service.sessionBusy : false
   readonly property bool sessionActive: activeSession !== null
     && String(activeSession.phase || "") !== "stopped"
+  readonly property bool disconnected: activeSession !== null
+    && String(activeSession.phase || "") === "disconnected"
+  readonly property bool trialActive: service ? service.trialActive : false
+  readonly property int trialRemaining: service ? service.trialRemainingSeconds : 0
   readonly property var displayRules: service ? service.displayRules : []
   readonly property string displayError: service ? service.displayError : ""
   readonly property bool displayBusy: service ? service.displayBusy : false
@@ -274,9 +280,17 @@ Panel {
     return out
   }
 
+  // All live applies are trials: the service auto-reverts after a timeout
+  // unless the user presses Keep (M6).
   function applyDisplay(display, fields) {
     if (!service || !display) return
-    service.applyDisplayRule(Model.displayRulePayload(display, fields))
+    service.beginDisplayTrial(Model.displayRulePayload(display, fields))
+  }
+
+  function reconnectActive() {
+    if (!root.service || !root.activeSession) return
+    var device = Model.reconnectDeviceFromSession(root.activeSession)
+    if (device) root.service.connectDevice(device, root.connectOptions())
   }
 
   function saveDisplay(display, fields) {
@@ -419,6 +433,7 @@ Panel {
 
               Column {
                 width: parent.width - Style.space(22) - disconnectButton.width - Style.space(16)
+                  - (reconnectButton.visible ? reconnectButton.width + parent.spacing : 0)
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.space(1)
 
@@ -437,15 +452,33 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   width: parent.width
-                  text: root.barState === "connecting"
-                    ? Model.tr(root.uiLanguage, "connecting")
-                    : Model.tr(root.uiLanguage, "casting") + " · "
-                      + Model.formatElapsed(root.castElapsedSeconds)
-                  color: Qt.darker(root.foreground, 1.4)
+                  text: root.disconnected
+                    ? Model.tr(root.uiLanguage, "tv_disconnected")
+                    : (root.barState === "connecting"
+                       ? Model.tr(root.uiLanguage, "connecting")
+                       : Model.tr(root.uiLanguage, "casting") + " · "
+                         + Model.formatElapsed(root.castElapsedSeconds))
+                  color: root.disconnected ? Color.urgent : Qt.darker(root.foreground, 1.4)
                   font.family: root.fontFamily
                   font.pixelSize: root.captionSize
                   elide: Text.ElideRight
                 }
+              }
+
+              Button {
+                id: reconnectButton
+                visible: root.disconnected
+                text: Model.tr(root.uiLanguage, "reconnect")
+                iconText: "󰑐"
+                bordered: true
+                enabled: !root.sessionBusy
+                opacity: enabled ? 1 : 0.45
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                onClicked: root.reconnectActive()
               }
 
               Button {
@@ -555,6 +588,50 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
+            }
+
+            // M6: an Apply is a trial until the user keeps it.
+            Column {
+              width: parent.width
+              visible: root.trialActive
+              spacing: Style.space(6)
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: Model.tr(root.uiLanguage, "layout_trial")
+                  + " · " + root.trialRemaining + "s — "
+                  + Model.tr(root.uiLanguage, "trial_hint")
+                color: Commons.Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.Wrap
+              }
+
+              Row {
+                spacing: Style.space(8)
+
+                Button {
+                  text: Model.tr(root.uiLanguage, "keep_layout")
+                  iconText: "󰄬"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.space(4)
+                  verticalPadding: Style.space(6)
+                  onClicked: if (root.service) root.service.keepDisplayTrial()
+                }
+
+                Button {
+                  text: Model.tr(root.uiLanguage, "revert_layout")
+                  iconText: "󰁮"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.space(4)
+                  verticalPadding: Style.space(6)
+                  onClicked: if (root.service) root.service.revertDisplayTrial()
+                }
+              }
             }
 
             Row {
@@ -908,6 +985,36 @@ Panel {
                 onClicked: root.persistSettings({
                   autoReconnect: !root.autoReconnect
                 })
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Column {
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: Model.tr(root.uiLanguage, "drop_policy")
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                }
+
+                ComboBox {
+                  width: Style.space(200)
+                  model: [
+                    Model.tr(root.uiLanguage, "drop_keep"),
+                    Model.tr(root.uiLanguage, "drop_remove")
+                  ]
+                  currentIndex: root.dropPolicy === "remove" ? 1 : 0
+                  font.family: root.fontFamily
+                  onActivated: root.persistSettings({
+                    dropPolicy: currentIndex === 1 ? "remove" : "keep"
+                  })
+                }
               }
             }
           }
@@ -1449,6 +1556,7 @@ Panel {
     required property int rowIndex
 
     readonly property bool isActive: root.isActiveDevice(device)
+    readonly property bool isDropped: isActive && root.disconnected
 
     hasCursor: root.cursorActive && root.focusSection === "devices" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(deviceRow)
@@ -1517,13 +1625,17 @@ Panel {
 
       Button {
         id: connectButton
-        text: deviceRow.isActive
-          ? Model.tr(root.uiLanguage, "disconnect")
-          : Model.tr(root.uiLanguage, "use_tv")
-        iconText: deviceRow.isActive ? "󰓛" : "󰐊"
-        tooltipText: deviceRow.isActive
-          ? "Stop the stream and remove the virtual monitor"
-          : "Use TV as second monitor"
+        text: deviceRow.isDropped
+          ? Model.tr(root.uiLanguage, "reconnect")
+          : (deviceRow.isActive
+             ? Model.tr(root.uiLanguage, "disconnect")
+             : Model.tr(root.uiLanguage, "use_tv"))
+        iconText: deviceRow.isDropped ? "󰑐" : (deviceRow.isActive ? "󰓛" : "󰐊")
+        tooltipText: deviceRow.isDropped
+          ? "Reconnect the TV to the kept virtual monitor"
+          : (deviceRow.isActive
+             ? "Stop the stream and remove the virtual monitor"
+             : "Use TV as second monitor")
         bordered: true
         foreground: root.foreground
         fontFamily: root.fontFamily
@@ -1534,7 +1646,8 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
         onClicked: {
           if (!root.service) return
-          if (deviceRow.isActive) root.requestDisconnect(deviceRow.device)
+          if (deviceRow.isDropped) root.reconnectActive()
+          else if (deviceRow.isActive) root.requestDisconnect(deviceRow.device)
           else root.service.connectDevice(deviceRow.device, root.connectOptions())
         }
       }

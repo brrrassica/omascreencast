@@ -10,17 +10,20 @@ resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 > **Status:** pre-alpha (v0.1.0 in progress). Discovery, the virtual-monitor session (create /
 > remove / reconcile), the capture → encode → LL-HLS → Chromecast pipeline, and the monitor
 > arranger (drag, snap, mode/scale/rotation/disable/mirror, persist) are wired, including a
-> rootless “Set up” dependency action and crash-out reconciliation. Remaining work is hardware
-> verification, recovery edge cases, notifications/settings/IPC, and packaging. See
-> `plans/milestones.md`.
+> rootless “Set up” dependency action, crash-out reconciliation, guarded layouts, trial/keep/
+> revert arrangement changes, receiver-drop handling, and idempotent teardown. Remaining work is
+> hardware verification and packaging. See `plans/milestones.md`.
 
 ## What it does
 
 - **Virtual network monitor** — a `HEADLESS-*` output enumerated by Hyprland and streamed to your TV.
 - **Monitor arranger** — position, resolution, scale, orientation, enable/disable, and mirror for all
-  displays, virtual ones included.
+  displays, virtual ones included. Live changes are **trials**: press **Keep** before the timeout or
+  they revert automatically, and a layout that would hide every display is refused.
 - **Rootless** — everything runs as your user. No `sudo`, no systemd unit. Casting needs one inbound
   firewall rule for the local stream port (or an already-open port); see Honest limitations.
+- **Recoverable** — state is reconciled against Hyprland on every shell start; a crash or a bad layout
+  cannot lock you out, and uninstall never leaves an orphaned headless output.
 - **Standard install** — a plain Omarchy plugin: clone, validate, enable.
 
 ## Honest limitations
@@ -95,9 +98,45 @@ and can be selected explicitly. The VAAPI node is discovered from
 
 The active virtual-monitor session is tracked in the single source of truth
 `~/.local/state/omascreencast/session.json` (atomic writes). The service
-reconciles it against `hyprctl monitors` on startup: stale sessions are cleaned
-automatically, while untracked `HEADLESS-*` outputs are only reported in the
-panel so a display you created by hand is never removed behind your back.
+reconciles it against `hyprctl monitors` on startup: stale sessions, outputs we
+recorded as ours, and outputs still targeted by one of our own `cast_engine.py`
+processes are cleaned automatically. A genuinely foreign `HEADLESS-*` output is
+only reported in the panel, so a display you created by hand is never removed
+behind your back.
+
+### Recovery
+
+- **Bad layout / monitors.lua edit.** Every save backs up `~/.config/hypr/monitors.lua`
+  (`*.omascreencast-<timestamp>.bak`) and writes atomically. If a generated file fails to
+  re-parse it is never written. Restore the newest backup with:
+
+  ```sh
+  python3 scripts/display_config.py restore
+  ```
+
+- **Orphaned output or recorder after a crash.** Reconcile (also run automatically on shell start):
+
+  ```sh
+  python3 scripts/session.py reconcile
+  ```
+
+- **Full teardown** (idempotent; stops every owned stream and removes every owned output):
+
+  ```sh
+  python3 scripts/session.py teardown
+  # or through the IPC surface:
+  # omarchy-shell ipc call omascreencast teardown
+  ```
+
+  A `HEADLESS-*` output the plugin did not create is never touched; remove it manually
+  with `hyprctl output remove HEADLESS-N` if you no longer need it.
+
+### TV disappears
+
+The `dropPolicy` setting chooses what happens when the receiver drops off the network while
+casting: **keep** the virtual monitor (default; the panel shows a Reconnect action) or
+**remove** it. With auto-reconnect enabled, the old output is torn down and a new session is
+retried automatically.
 
 ## Repository layout
 
@@ -117,8 +156,19 @@ plans/                 # local-only roadmap (gitignored)
 
 ## Uninstall
 
+Omarchy has no plugin-disable hook, so tear down any live session **before** removing the plugin:
+
 ```sh
+python3 ~/.config/omarchy/plugins/tech.alatcerdas.omascreencast/scripts/session.py teardown
 omarchy plugin remove tech.alatcerdas.omascreencast
+```
+
+`teardown` is idempotent and safe to run with no active session. If the plugin folder is already
+gone, clean up manually:
+
+```sh
+pkill -f 'cast_engine.py stream' || true
+hyprctl monitors all -j | jq -r '.[].name' | grep '^HEADLESS-' | xargs -r -n1 hyprctl output remove
 ```
 
 Python packages and the private venv (if created) are left in place; remove `~/.local/share/omascreencast`

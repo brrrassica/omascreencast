@@ -582,7 +582,21 @@ var _TRANSLATIONS = {
     no_devices: "No Chromecast devices found.",
     setup_required: "Missing Python dependencies.",
     displays: "displays",
-    devices: "devices"
+    devices: "devices",
+    layout_kept: "Layout kept",
+    layout_reverted: "Layout reverted",
+    layout_trial: "Layout trial",
+    trial_hint: "Keep this layout before it reverts automatically.",
+    keep_layout: "Keep",
+    revert_layout: "Revert",
+    tv_disconnected: "TV connection lost",
+    monitor_kept: "Virtual monitor kept — reconnect when the TV is back.",
+    monitor_removed: "The virtual monitor was removed.",
+    reconnecting_to: "Reconnecting to",
+    reconnect: "Reconnect",
+    drop_policy: "On TV disconnect",
+    drop_keep: "Keep monitor",
+    drop_remove: "Remove monitor"
   },
   id: {
     searching: "Mencari…",
@@ -602,7 +616,21 @@ var _TRANSLATIONS = {
     no_devices: "Tidak ada perangkat Chromecast ditemukan.",
     setup_required: "Dependensi Python belum lengkap.",
     displays: "layar",
-    devices: "perangkat"
+    devices: "perangkat",
+    layout_kept: "Tata letak disimpan",
+    layout_reverted: "Tata letak dikembalikan",
+    layout_trial: "Uji tata letak",
+    trial_hint: "Pertahankan tata letak ini sebelum dikembalikan otomatis.",
+    keep_layout: "Pertahankan",
+    revert_layout: "Kembalikan",
+    tv_disconnected: "Koneksi TV terputus",
+    monitor_kept: "Monitor virtual dipertahankan — sambungkan lagi saat TV kembali.",
+    monitor_removed: "Monitor virtual dihapus.",
+    reconnecting_to: "Menghubungkan ulang ke",
+    reconnect: "Sambungkan lagi",
+    drop_policy: "Saat TV terputus",
+    drop_keep: "Pertahankan monitor",
+    drop_remove: "Hapus monitor"
   }
 }
 

@@ -175,6 +175,40 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(self.dc.selector_for_monitor({"name": "HEADLESS-1"}), "HEADLESS-1")
 
 
+class GuardVisibleLayoutTest(unittest.TestCase):
+    def setUp(self):
+        self.dc = _load()
+        self.monitors = [
+            {"name": "eDP-1", "disabled": False, "mirrorOf": "none"},
+        ]
+
+    def test_refuses_to_disable_the_last_display(self):
+        with self.assertRaises(self.dc.ConfigError):
+            self.dc.guard_visible_layout(
+                {"output": "eDP-1", "disabled": True}, self.monitors)
+
+    def test_allows_disabling_when_another_display_remains(self):
+        monitors = self.monitors + [
+            {"name": "HDMI-A-1", "disabled": False, "mirrorOf": "none"},
+        ]
+        self.dc.guard_visible_layout(
+            {"output": "eDP-1", "disabled": True}, monitors)
+
+    def test_refuses_mirroring_every_remaining_output(self):
+        monitors = [
+            {"name": "eDP-1", "disabled": True, "mirrorOf": "none"},
+            {"name": "HDMI-A-1", "disabled": False, "mirrorOf": "none"},
+        ]
+        with self.assertRaises(self.dc.ConfigError):
+            self.dc.guard_visible_layout(
+                {"output": "HDMI-A-1", "mirror": "eDP-1"}, monitors)
+
+    def test_unknown_output_is_allowed(self):
+        # A just-created HEADLESS output may not be in the monitor list yet.
+        self.dc.guard_visible_layout(
+            {"output": "HEADLESS-1", "disabled": False}, self.monitors)
+
+
 class SaveRuleTest(unittest.TestCase):
     def setUp(self):
         self.dc = _load()
@@ -271,6 +305,23 @@ class SaveRuleTest(unittest.TestCase):
                 {"output": "HEADLESS-1", "mode": "1920x1080@60", "position": "1920x0"},
             )
         self.assertEqual(self.path.read_text(), broken)
+
+    def test_restore_uses_the_newest_valid_backup(self):
+        self.path.write_text(SOURCE, encoding="utf-8")
+        self.dc.backup_config(self.path)
+        self.path.write_text("-- changed\n", encoding="utf-8")
+        result = self.dc.restore_config(self.path)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.path.read_text(), SOURCE)
+
+    def test_restore_refuses_a_corrupt_backup(self):
+        self.path.write_text(SOURCE, encoding="utf-8")
+        backup = Path(self.dc.backup_config(self.path))
+        backup.write_text('hl.monitor({ output = "broken"', encoding="utf-8")
+        self.path.write_text("-- current\n", encoding="utf-8")
+        with self.assertRaises(self.dc.ConfigError):
+            self.dc.restore_config(self.path)
+        self.assertEqual(self.path.read_text(), "-- current\n")
 
 
 if __name__ == "__main__":

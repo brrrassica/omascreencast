@@ -20,7 +20,8 @@ The receiver only accepts HLS (raw MPEG-TS and DASH are rejected) and requires
 CORS headers; see ``plans/m0-spikes.md`` (Spikes H/J) and ``plans/milestones.md``
 (M3, R2a-R2f).
 
-Planned phases: discovering -> starting -> casting -> idle/error.
+Phases: discovering -> starting -> casting -> idle/error, plus ``disconnected``
+when the receiver disappears (M6) so the service can keep or remove the output.
 """
 
 from __future__ import annotations
@@ -795,6 +796,37 @@ def _cast_from_host(host: str, log: logging.Logger, uuid: str = "",
     )
 
 
+class _ReceiverDropListener:
+    """Detect the receiver disappearing after playback started (M6).
+
+    pychromecast delivers media-status callbacks from its own thread. A
+    transition to IDLE after we were PLAYING/BUFFERING means the TV or the
+    network went away, so the stream loop can stop and let the service keep or
+    remove the virtual output according to the user's preference.
+    """
+
+    def __init__(self, on_drop) -> None:
+        self._on_drop = on_drop
+        self._playing = False
+        self._reported = False
+
+    def _drop(self, reason: str) -> None:
+        if not self._reported:
+            self._reported = True
+            self._on_drop(reason)
+
+    def new_media_status(self, status) -> None:
+        state = str(getattr(status, "player_state", "") or "")
+        if state in ("PLAYING", "BUFFERING"):
+            self._playing = True
+            return
+        if self._playing and state == "IDLE":
+            self._drop("receiver idle")
+
+    def load_media_failed(self, *args) -> None:
+        self._drop("receiver load failed")
+
+
 def _teardown(cap, ff, srv, mc, run_dir: Path, log: logging.Logger,
               browser=None) -> None:
     if mc is not None:
@@ -1371,6 +1403,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
     cap = ff = None
     mc = None
     browser = None
+    terminal_phase = ""
     try:
         cap = subprocess.Popen(
             capture_command(
@@ -1425,6 +1458,20 @@ def cmd_stream(args: argparse.Namespace) -> int:
         except TypeError:  # older pychromecast: no timeout argument
             cast.wait()
         mc = cast.media_controller
+        drop: dict[str, str] = {}
+        drop_seen = threading.Event()
+
+        def _on_drop(reason: str) -> None:
+            if not drop_seen.is_set():
+                drop["reason"] = reason
+                drop_seen.set()
+
+        listener = _ReceiverDropListener(_on_drop)
+        try:
+            mc.register_status_listener(listener)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("register_status_listener: %s", exc)
+
         mc.play_media(url, HLS_MIME)
         try:
             mc.block_until_active(timeout=20)
@@ -1455,16 +1502,31 @@ def cmd_stream(args: argparse.Namespace) -> int:
         while not stop.is_set():
             if deadline is not None and time.time() >= deadline:
                 break
+            if drop_seen.is_set():
+                terminal_phase = "disconnected"
+                reason = drop.get("reason") or "receiver disconnected"
+                log.warning("receiver disappeared: %s", reason)
+                emit({"type": "phase", "phase": "disconnected", "detail": reason})
+                break
             if cap.poll() is not None or ff.poll() is not None:
                 log.warning("pipeline process exited early")
                 emit({"type": "phase", "phase": "error", "detail": "capture/encode exited"})
                 break
             time.sleep(0.5)
     finally:
+        if mc is not None and 'listener' in locals():
+            try:
+                mc.unregister_status_listener(listener)
+            except Exception:  # noqa: BLE001
+                pass
         _teardown(cap, ff, srv, mc, run_dir, log, browser=browser)
-        session_state.mark_stopped()
-        log.info("stream stopped; buffer stats=%s", buf.stats())
-        emit({"type": "phase", "phase": "idle", "detail": "stopped"})
+        if terminal_phase:
+            session_state.mark_stopped(terminal_phase)
+            log.info("stream ended (%s); buffer stats=%s", terminal_phase, buf.stats())
+        else:
+            session_state.mark_stopped()
+            log.info("stream stopped; buffer stats=%s", buf.stats())
+            emit({"type": "phase", "phase": "idle", "detail": "stopped"})
     return 0
 
 

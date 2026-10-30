@@ -518,6 +518,88 @@ def rule_for_monitor(rules: list[dict], monitor: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Guard rails (M6): never let a layout hide every display
+# ---------------------------------------------------------------------------
+def load_monitors() -> list[dict]:
+    """Return ``hyprctl monitors all -j``; an unavailable compositor is empty."""
+    try:
+        result = subprocess.run(
+            ["hyprctl", "monitors", "all", "-j"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        data = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    return [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+
+
+def _layout_after(monitors: list[dict], fields: dict) -> list[dict]:
+    """Return the layout Hyprland would have after applying one rule.
+
+    Unspecified fields keep their current values, exactly like ``hyprctl eval``
+    does for ``hl.monitor``. Mirrored outputs are included but never counted as
+    independently visible space.
+    """
+    target = str(fields.get("output") or "")
+    layout: list[dict] = []
+    for monitor in monitors:
+        name = str(monitor.get("name") or "")
+        mirror = str(monitor.get("mirrorOf") or "")
+        if mirror.lower() == "none":
+            mirror = ""
+        item = {
+            "name": name,
+            "disabled": monitor.get("disabled") is True,
+            "mirror": mirror,
+        }
+        if target and name == target:
+            if "disabled" in fields:
+                item["disabled"] = fields["disabled"] is True
+            if "mirror" in fields:
+                mirror_value = str(fields.get("mirror") or "")
+                item["mirror"] = "" if mirror_value.lower() == "none" else mirror_value
+        layout.append(item)
+    return layout
+
+
+def guard_visible_layout(fields: dict, monitors: list[dict] | None = None) -> None:
+    """Refuse arrangements that leave no independently visible display (M6).
+
+    Disabling the last display, or mirroring every remaining output onto a
+    disabled one, would leave the user with no way back except a TTY. A rule for
+    an output Hyprland does not know yet (e.g. a just-created HEADLESS output)
+    cannot hide an existing display, so it is allowed through.
+    """
+    known = load_monitors() if monitors is None else monitors
+    if not known:
+        return
+    name = str(fields.get("output") or "")
+    if name and not any(str(m.get("name") or "") == name for m in known):
+        return
+    layout = _layout_after(known, fields)
+    visible = [
+        item for item in layout
+        if not item["disabled"] and item["mirror"] == ""
+    ]
+    if visible:
+        return
+    if fields.get("disabled") is True:
+        raise ConfigError(
+            "refusing to disable the last display: the layout would leave no "
+            "visible output (save or apply an arrangement with another active display)"
+        )
+    raise ConfigError(
+        "refusing an arrangement with no visible output: enable a display or "
+        "stop mirroring every remaining output"
+    )
+
+
+# ---------------------------------------------------------------------------
 # File handling
 # ---------------------------------------------------------------------------
 def read_config(path: Path) -> str:
@@ -533,12 +615,22 @@ def backup_config(path: Path) -> str:
     return str(backup)
 
 
+def _backups(path: Path) -> list[Path]:
+    try:
+        return sorted(path.parent.glob(path.name + ".omascreencast-*.bak"))
+    except OSError:
+        return []
+
+
+def latest_backup(path: Path) -> Path | None:
+    """Return the newest timestamped backup of ``path``."""
+    backups = _backups(path)
+    return backups[-1] if backups else None
+
+
 def _prune_backups(path: Path, keep: int = 3) -> None:
     """Keep only the most recent backups so the config dir does not grow forever."""
-    try:
-        backups = sorted(path.parent.glob(path.name + ".omascreencast-*.bak"))
-    except OSError:
-        return
+    backups = _backups(path)
     for old in backups[:-keep] if keep > 0 else backups:
         try:
             old.unlink()
@@ -601,6 +693,26 @@ def save_rule(path: Path, monitor: dict, fields: dict) -> dict:
     backup = backup_config(path) if path.exists() else ""
     _atomic_write(path, updated)
     return {"ok": True, "changed": True, "selector": selector, "backup": backup}
+
+
+def restore_config(path: Path) -> dict:
+    """Restore the newest valid backup atomically (M6 recovery).
+
+    The restored backup is parsed first; a corrupt backup can never replace the
+    current file. The current file is backed up before restoring, so a restore
+    is itself reversible.
+    """
+    backup = latest_backup(path)
+    if backup is None:
+        raise ConfigError(f"no backup found for {path}")
+    try:
+        content = backup.read_text(encoding="utf-8")
+        parse_rules(content)
+    except (OSError, ConfigError) as exc:
+        raise ConfigError(f"refusing to restore unreadable backup {backup}: {exc}") from exc
+    previous = backup_config(path) if path.exists() else ""
+    _atomic_write(path, content)
+    return {"ok": True, "restored": str(backup), "backup": previous}
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +797,16 @@ def cmd_backup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_restore(args: argparse.Namespace) -> int:
+    path = Path(args.config)
+    try:
+        _emit(restore_config(path))
+        return 0
+    except (ConfigError, OSError) as exc:
+        _emit({"ok": False, "error": str(exc)})
+        return 1
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     try:
         rule = _load_rule(args.rule)
@@ -697,6 +819,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         # cannot be applied at runtime.
         if str(fields.get("output", "")).startswith("desc:"):
             raise ConfigError("apply needs the output name, not a desc: selector")
+        guard_visible_layout(fields)
         result = apply_rule(fields)
         result["output"] = fields["output"]
         _emit(result)
@@ -721,6 +844,7 @@ def cmd_save(args: argparse.Namespace) -> int:
         # selector (desc:... when a description is supplied).
         runtime = dict(fields)
         runtime["output"] = name
+        guard_visible_layout(runtime)
         applied = apply_rule(runtime)
         monitor = {"name": name, "description": str(rule.get("description") or "")}
         persisted = save_rule(path, monitor, fields)
@@ -743,6 +867,7 @@ def parse_args() -> argparse.Namespace:
     sub.add_parser("show", help="print the current monitor config")
     sub.add_parser("rules", help="print parsed hl.monitor rules as JSON")
     sub.add_parser("backup", help="back up the monitor config")
+    sub.add_parser("restore", help="restore the newest timestamped backup")
     apply = sub.add_parser("apply", help="apply an ephemeral arrangement rule")
     apply.add_argument("--rule", required=True,
                        help='JSON rule, e.g. {"name":"HEADLESS-1","position":"1920x0"}')
@@ -757,6 +882,7 @@ def main() -> int:
         "show": cmd_show,
         "rules": cmd_rules,
         "backup": cmd_backup,
+        "restore": cmd_restore,
         "apply": cmd_apply,
         "save": cmd_save,
     }
