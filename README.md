@@ -78,6 +78,10 @@ omarchy-shell shell rescanPlugins
 python3 -m unittest discover -s tests -v
 ```
 
+Logs and opt-in debug dumps are written to `~/.config/omascreencast/`
+(`cast_engine.log`, plus `debug/` when `stream --debug` is used). The HLS
+segments themselves are buffered **in RAM** and never written to disk.
+
 ## Repository layout
 
 ```
@@ -87,7 +91,7 @@ Service.qml            # headless service singleton: session state, discovery, r
 Model.js               # pure JSON -> view-model helpers
 scripts/
   bootstrap.py         # rootless dependency resolution (system pkgs -> private venv)
-  cast_engine.py       # discovery + capture -> encode -> serve -> Chromecast
+  cast_engine.py       # discovery + capture -> encode -> serve -> Chromecast (in-memory LL-HLS)
   display_config.py    # literal-only editor for ~/.config/hypr/monitors.lua
   session.py           # session-state tracking + orphan reconciliation
 tests/                 # unittest suite + captured fixtures
