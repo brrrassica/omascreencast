@@ -10,9 +10,15 @@ Latency and performance release.
 
 ### Added
 
+- **Reworked display arranger.** The plugin panel now shows every physical and
+  virtual output as numbered, draggable cards on one shared-scale canvas, with
+  edge snapping and an **Identify** flash. Selecting a display opens a detail
+  card with resolution and refresh rate, scale, orientation, extend/mirror
+  mode, and a **Turn off/Turn on** action, plus Apply (trial) and Save
+  (`monitors.lua`). No separate application is required.
 - **Tracked performance report.** [`docs/performance.md`](docs/performance.md) records the
- wired-Ethernet re-measurement (0.37 ms RTT, TTFF, fetch cadence), the LL-HLS-vs-plain-fMP4
- comparison, and the subjective glass-to-glass observations and method.
+  wired-Ethernet re-measurement (0.37 ms RTT, TTFF, fetch cadence), the LL-HLS-vs-plain-fMP4
+  comparison, and the subjective glass-to-glass observations and method.
 
 ### Fixed
 

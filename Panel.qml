@@ -175,20 +175,14 @@ Panel {
   }
 
   // --- cursor model (keyboard + mouse share one highlight) ---------------
-  // Sections: "displays" (only when a display exists) and "devices".
-  readonly property var visibleSections: {
-    var list = []
-    if (monitors.length > 0) list.push("displays")
-    list.push("devices")
-    return list
-  }
+  // The arranger is pointer-driven; keyboard navigation covers receivers.
+  readonly property var visibleSections: ["devices"]
 
   property string focusSection: "devices"
   property int selectedIndex: 0
   property bool cursorActive: false
 
   function sectionCount(section) {
-    if (section === "displays") return monitors.length
     if (section === "devices") return devices.length
     return 0
   }
@@ -249,7 +243,7 @@ Panel {
     else if (bottom > viewBottom - margin) flick.contentY = bottom + margin - flick.height
   }
 
-  onMonitorsChanged: clampCursor()
+  onMonitorsChanged: { clampCursor(); ensureDisplaySelection() }
   onDevicesChanged: clampCursor()
   onVisibleSectionsChanged: clampCursor()
 
@@ -265,7 +259,87 @@ Panel {
       service.refreshDisplayRules()
       service.refreshDevices()
     }
+    ensureDisplaySelection()
     cursorActive = false
+  }
+
+  // --- selected display (arranger detail card) --------------------------
+  property string selectedDisplayName: ""
+  property var detailEdits: ({})
+  property bool identifyActive: false
+
+  onTrialActiveChanged: if (!trialActive) refreshSelectedEdits()
+
+  function monitorByName(name) {
+    var target = String(name || "")
+    if (target === "") return null
+    for (var i = 0; i < monitors.length; i++) {
+      if (String(monitors[i].name || "") === target) return monitors[i]
+    }
+    return null
+  }
+
+  function selectedMonitor() {
+    return monitorByName(selectedDisplayName)
+  }
+
+  function selectDisplay(display) {
+    if (!display) return
+    selectedDisplayName = String(display.name || "")
+    detailEdits = Model.displayFieldsFor(display, displayRules)
+  }
+
+  // Keep a display selected as the list grows/shrinks (hotplug, cast start).
+  function ensureDisplaySelection() {
+    if (monitors.length === 0) {
+      selectedDisplayName = ""
+      detailEdits = ({})
+      return
+    }
+    if (selectedMonitor() !== null) return
+    selectDisplay(monitors[0])
+  }
+
+  // Re-sync the detail card with Hyprland after an apply/revert/save.
+  function refreshSelectedEdits() {
+    var display = selectedMonitor()
+    if (display) detailEdits = Model.displayFieldsFor(display, displayRules)
+  }
+
+  function updateSelected(key, value) {
+    detailEdits = withField(detailEdits, key, value)
+  }
+
+  function applySelected() {
+    var display = selectedMonitor()
+    if (display) applyDisplay(display, detailEdits)
+  }
+
+  function saveSelected() {
+    var display = selectedMonitor()
+    if (display) saveDisplay(display, detailEdits)
+  }
+
+  // Power is a single-field action, so it applies immediately as a trial
+  // (guard_visible_layout still refuses to hide the last visible display).
+  function toggleSelectedPower() {
+    var display = selectedMonitor()
+    if (!display) return
+    updateSelected("disabled", detailEdits.disabled !== true)
+    applyDisplay(display, detailEdits)
+  }
+
+  // Flash the numbering inside the arranger (no layer-shell overlays).
+  function identify() {
+    identifyActive = true
+    identifyTimer.restart()
+  }
+
+  Timer {
+    id: identifyTimer
+    interval: 1400
+    repeat: false
+    onTriggered: root.identifyActive = false
   }
 
   // --- arranger actions (M4) --------------------------------------------
@@ -541,10 +615,35 @@ Panel {
             width: parent.width
             spacing: Style.space(10)
 
-            PanelSectionHeader {
-              text: "DISPLAYS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(displaysHeader.implicitHeight,
+                                      identifyButton.implicitHeight)
+
+              PanelSectionHeader {
+                id: displaysHeader
+                text: "DISPLAYS"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Button {
+                id: identifyButton
+                visible: root.monitors.length > 0
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.identifyActive ? "Identify…" : "Identify"
+                iconText: "󰍹"
+                tooltipText: "Flash each display's number in this arrangement"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(6)
+                onClicked: root.identify()
+              }
             }
 
             Text {
@@ -564,27 +663,18 @@ Panel {
               id: arrangement
               visible: root.monitors.length > 0
               width: parent.width
+              selectedName: root.selectedDisplayName
+              onSelectRequested: function(name) {
+                root.selectDisplay(root.monitorByName(name))
+              }
             }
 
             Text {
               textFormat: Text.PlainText
-              visible: root.overlappingPairs.length > 0
+              visible: root.monitors.length > 0
               width: parent.width
-              text: "Overlapping displays: " + root.overlappingPairs.map(function(pair) {
-                return pair.join(" / ")
-              }).join(", ")
-              color: Color.urgent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.Wrap
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              visible: root.displayError !== ""
-              width: parent.width
-              text: root.displayError
-              color: Color.urgent
+              text: "Drag a display to arrange it — edges snap together. Click a display to change its settings."
+              color: Qt.darker(root.foreground, 1.4)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.Wrap
@@ -634,6 +724,330 @@ Panel {
               }
             }
 
+            Text {
+              textFormat: Text.PlainText
+              visible: root.overlappingPairs.length > 0
+              width: parent.width
+              text: "Overlapping displays: " + root.overlappingPairs.map(function(pair) {
+                return pair.join(" / ")
+              }).join(", ")
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.displayError !== ""
+              width: parent.width
+              text: root.displayError
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+            }
+
+            // ---------- Selected display detail card ----------
+            Column {
+              id: displayDetails
+              width: parent.width
+              visible: root.selectedMonitor() !== null
+              spacing: Style.space(8)
+
+              readonly property var monitor: root.selectedMonitor()
+              readonly property var edits: root.detailEdits
+              readonly property var resolutionList: Model.resolutionChoices(monitor, edits.mode)
+              readonly property var rateList: Model.refreshChoices(monitor, edits.mode)
+              readonly property var mirrorList: {
+                var out = [""]
+                for (var i = 0; i < root.monitors.length; i++) {
+                  var other = root.monitors[i]
+                  if (String(other.name || "") !== String(monitor ? monitor.name : ""))
+                    out.push(String(other.name || ""))
+                }
+                return out
+              }
+              readonly property bool powered: edits.disabled !== true
+              readonly property string castSuffix:
+                Model.monitorSessionLabel(monitor, root.activeSession, root.devices)
+
+              PanelSeparator { foreground: root.foreground }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: displayDetails.monitor && displayDetails.monitor.virtual
+                    ? "󰒍" : "󰍹"
+                  color: displayDetails.powered
+                    ? root.foreground : Qt.darker(root.foreground, 1.6)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.titleSize
+                  width: Style.space(22)
+                  horizontalAlignment: Text.AlignHCenter
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Column {
+                  width: parent.width - Style.space(22) - powerButton.width
+                    - parent.spacing * 2
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(1)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    text: String(displayDetails.monitor ? displayDetails.monitor.name : "")
+                      + displayDetails.castSuffix
+                    color: displayDetails.castSuffix !== ""
+                      ? Commons.Color.accent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: root.bodySize
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    text: (displayDetails.monitor && displayDetails.monitor.description
+                           ? displayDetails.monitor.description + " · " : "")
+                      + Model.resolutionLabel(Model.resolutionOf(displayDetails.edits.mode))
+                      + (displayDetails.powered ? "" : " · off")
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.family: root.fontFamily
+                    font.pixelSize: root.captionSize
+                    elide: Text.ElideRight
+                  }
+                }
+
+                Button {
+                  id: powerButton
+                  text: displayDetails.powered ? "Turn off" : "Turn on"
+                  iconText: displayDetails.powered ? "󰐥" : "󰐊"
+                  tooltipText: displayDetails.powered
+                    ? "Disable this output (trial)"
+                    : "Enable this output (trial)"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  horizontalPadding: Style.space(4)
+                  verticalPadding: Style.space(6)
+                  enabled: !root.displayBusy && !!displayDetails.monitor
+                  opacity: enabled ? 1 : 0.45
+                  anchors.verticalCenter: parent.verticalCenter
+                  onClicked: root.toggleSelectedPower()
+                }
+              }
+
+              Column {
+                width: parent.width
+                enabled: displayDetails.powered && !!displayDetails.monitor
+                opacity: enabled ? 1 : 0.45
+                spacing: Style.space(8)
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  Column {
+                    spacing: Style.space(2)
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "Resolution"
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: root.captionSize
+                    }
+                    ComboBox {
+                      width: Style.space(150)
+                      model: displayDetails.resolutionList.map(function(res) {
+                        return Model.resolutionLabel(res)
+                      })
+                      currentIndex: Math.max(0,
+                        displayDetails.resolutionList.indexOf(
+                          Model.resolutionOf(displayDetails.edits.mode)))
+                      font.family: root.fontFamily
+                      onActivated: {
+                        var res = Model.resolutionFromLabel(currentText)
+                        var rate = Model.refreshOf(displayDetails.edits.mode)
+                        var rates = Model.refreshChoices(displayDetails.monitor,
+                          res + "@" + rate)
+                        if (rates.indexOf(rate) < 0)
+                          rate = rates.length > 0 ? rates[0] : rate
+                        root.updateSelected("mode", Model.modeFor(res, rate))
+                      }
+                    }
+                  }
+
+                  Column {
+                    spacing: Style.space(2)
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "Refresh rate"
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: root.captionSize
+                    }
+                    ComboBox {
+                      width: Style.space(120)
+                      model: displayDetails.rateList.map(function(hz) {
+                        return String(hz) + " Hz"
+                      })
+                      currentIndex: Math.max(0,
+                        displayDetails.rateList.indexOf(
+                          Model.refreshOf(displayDetails.edits.mode)))
+                      font.family: root.fontFamily
+                      onActivated: root.updateSelected("mode",
+                        Model.modeFor(Model.resolutionOf(displayDetails.edits.mode),
+                          Number(String(currentText).replace(" Hz", ""))))
+                    }
+                  }
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  Column {
+                    spacing: Style.space(2)
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "Scale"
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: root.captionSize
+                    }
+                    ComboBox {
+                      width: Style.space(110)
+                      model: Model.scaleChoices(displayDetails.edits.scale).map(
+                        function(scale) { return Model.scaleLabel(scale) })
+                      currentIndex: {
+                        var choices = Model.scaleChoices(displayDetails.edits.scale)
+                        return Math.max(0,
+                          choices.indexOf(Number(displayDetails.edits.scale)))
+                      }
+                      font.family: root.fontFamily
+                      onActivated: root.updateSelected("scale",
+                        Model.scaleFromLabel(currentText))
+                    }
+                  }
+
+                  Column {
+                    spacing: Style.space(2)
+                    Text {
+                      textFormat: Text.PlainText
+                      text: "Orientation"
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: root.captionSize
+                    }
+                    ComboBox {
+                      width: Style.space(160)
+                      model: [
+                        Model.orientationLabel(0),
+                        Model.orientationLabel(1),
+                        Model.orientationLabel(2),
+                        Model.orientationLabel(3)
+                      ]
+                      currentIndex: {
+                        var transform = Number(displayDetails.edits.transform || 0)
+                        return transform >= 0 && transform <= 3 ? transform : 0
+                      }
+                      font.family: root.fontFamily
+                      onActivated: root.updateSelected("transform", currentIndex)
+                    }
+                  }
+                }
+
+                Column {
+                  width: parent.width
+                  spacing: Style.space(2)
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "Display mode"
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.family: root.fontFamily
+                    font.pixelSize: root.captionSize
+                  }
+                  ComboBox {
+                    width: Math.min(parent.width, Style.space(260))
+                    model: displayDetails.mirrorList.map(function(name) {
+                      return name === "" ? "Extend desktop" : "Mirror " + name
+                    })
+                    currentIndex: {
+                      var idx = displayDetails.mirrorList.indexOf(
+                        String(displayDetails.edits.mirror || ""))
+                      return idx < 0 ? 0 : idx
+                    }
+                    font.family: root.fontFamily
+                    onActivated: root.updateSelected("mirror",
+                      currentIndex === 0
+                        ? ""
+                        : displayDetails.mirrorList[currentIndex])
+                  }
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width - applyButton.width - saveButton.width
+                      - Style.space(16)
+                    text: "Position " + String(displayDetails.edits.position || "")
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.family: root.fontFamily
+                    font.pixelSize: root.captionSize
+                    elide: Text.ElideRight
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Button {
+                    id: applyButton
+                    text: "Apply"
+                    iconText: "󰄬"
+                    bordered: true
+                    enabled: !root.displayBusy
+                    opacity: enabled ? 1 : 0.45
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    horizontalPadding: Style.space(4)
+                    verticalPadding: Style.space(6)
+                    onClicked: root.applySelected()
+                  }
+
+                  Button {
+                    id: saveButton
+                    text: "Save"
+                    iconText: "󰆓"
+                    bordered: true
+                    enabled: !root.displayBusy
+                    opacity: enabled ? 1 : 0.45
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    horizontalPadding: Style.space(4)
+                    verticalPadding: Style.space(6)
+                    onClicked: root.saveSelected()
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: "Apply previews this layout as a trial; Save writes it to monitors.lua (backed up first)."
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: root.captionSize
+                  wrapMode: Text.Wrap
+                }
+              }
+            }
+
             Row {
               width: parent.width
               spacing: Style.space(8)
@@ -660,19 +1074,6 @@ Panel {
                 verticalPadding: Style.space(6)
                 enabled: !root.sessionBusy
                 onClicked: if (root.service) root.service.cleanupOrphan(root.sessionOrphans[0])
-              }
-            }
-
-            Repeater {
-              model: root.monitors
-
-              MonitorRow {
-                required property var modelData
-                required property int index
-
-                width: panelColumn.width
-                display: modelData
-                rowIndex: index
               }
             }
           }
@@ -1160,21 +1561,27 @@ Panel {
     manualField.text = ""
   }
 
-  // Scrollable-free spatial preview of the layout: drag a display to move it.
+  // Spatial arrangement preview: numbered display cards sharing one scale, with
+  // edge snapping while dragging (M4).
   component ArrangementCanvas: Rectangle {
     id: canvas
+
+    property string selectedName: ""
+    signal selectRequested(string displayName)
+
     readonly property var bounds: Model.arrangementBounds(root.monitors)
-    readonly property real pad: Style.space(10)
+    readonly property real pad: Style.space(16)
     readonly property real factor: Math.min(
       Math.max(1, width - pad * 2) / bounds.width,
       Math.max(1, implicitHeight - pad * 2) / bounds.height)
     readonly property real offX: pad + (Math.max(1, width - pad * 2) - bounds.width * factor) / 2
     readonly property real offY: pad + (Math.max(1, implicitHeight - pad * 2) - bounds.height * factor) / 2
-    implicitHeight: Style.space(150)
+
+    implicitHeight: Style.space(180)
     color: "transparent"
     border.width: 1
-    border.color: Qt.darker(root.foreground, 2.4)
-    radius: Style.space(6)
+    border.color: Qt.darker(root.foreground, 2.6)
+    radius: Style.space(8)
     clip: true
 
     function pxX(logicalX) { return offX + (Number(logicalX) - bounds.minX) * factor }
@@ -1191,59 +1598,95 @@ Panel {
         property bool dragging: false
         property real dragX: Number(modelData.x || 0)
         property real dragY: Number(modelData.y || 0)
+
         readonly property var size: Model.monitorLogicalSize(modelData)
         readonly property bool isVirtual: modelData.virtual === true
         readonly property bool isDisabled: modelData.disabled === true
+        readonly property bool isSelected:
+          String(modelData.name || "") === canvas.selectedName
+        readonly property bool highlighted: isSelected || root.identifyActive
 
         x: Math.round(canvas.pxX(dragging ? dragX : modelData.x))
         y: Math.round(canvas.pxY(dragging ? dragY : modelData.y))
-        width: Math.max(Style.space(24), size.width * canvas.factor)
-        height: Math.max(Style.space(16), size.height * canvas.factor)
-        radius: Style.space(3)
-        opacity: isDisabled ? 0.35 : 1
-        color: isVirtual ? Qt.darker(Commons.Color.accent, 2.6) : "transparent"
-        border.width: 1
-        border.color: isVirtual ? Commons.Color.accent : root.foreground
+        width: Math.max(Style.space(46), size.width * canvas.factor)
+        height: Math.max(Style.space(34), size.height * canvas.factor)
+        radius: Style.space(6)
+        opacity: isDisabled ? 0.4 : 1
+        color: isSelected
+          ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
+          : (isVirtual ? Qt.darker(Commons.Color.accent, 2.8) : "transparent")
+        border.width: highlighted ? 2 : 1
+        border.color: highlighted || isVirtual
+          ? Commons.Color.accent
+          : Qt.darker(root.foreground, 1.5)
 
-        Text {
-          anchors.fill: parent
-          anchors.margins: Style.space(2)
-          textFormat: Text.PlainText
-          text: String(modelData.name || "")
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: root.captionSize
-          elide: Text.ElideRight
-          horizontalAlignment: Text.AlignHCenter
-          verticalAlignment: Text.AlignVCenter
+        Column {
+          anchors.centerIn: parent
+          width: Math.max(0, parent.width - Style.space(8))
+          spacing: Style.space(1)
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: String(card.index + 1)
+            color: card.highlighted ? Commons.Color.accent : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: root.titleSize
+            font.bold: true
+            horizontalAlignment: Text.AlignHCenter
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: String(card.modelData.name || "")
+            color: card.highlighted ? Commons.Color.accent : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: root.captionSize
+            elide: Text.ElideRight
+            horizontalAlignment: Text.AlignHCenter
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            visible: card.isDisabled
+            text: "Off"
+            color: Qt.darker(root.foreground, 1.4)
+            font.family: root.fontFamily
+            font.pixelSize: root.captionSize
+            horizontalAlignment: Text.AlignHCenter
+          }
         }
 
         MouseArea {
           anchors.fill: parent
-          enabled: !card.isDisabled
-          cursorShape: Qt.SizeAllCursor
+          cursorShape: card.isDisabled ? Qt.ArrowCursor : Qt.SizeAllCursor
           property real pressX: 0
           property real pressY: 0
           property real startLogicalX: 0
           property real startLogicalY: 0
 
           onPressed: function(mouse) {
+            canvas.selectRequested(String(card.modelData.name || ""))
+            if (card.isDisabled) return
             var point = mapToItem(canvas, mouse.x, mouse.y)
             pressX = point.x
             pressY = point.y
-            startLogicalX = Number(modelData.x || 0)
-            startLogicalY = Number(modelData.y || 0)
+            startLogicalX = Number(card.modelData.x || 0)
+            startLogicalY = Number(card.modelData.y || 0)
             card.dragging = true
             card.dragX = startLogicalX
             card.dragY = startLogicalY
           }
 
           onPositionChanged: function(mouse) {
-            if (!pressed) return
+            if (!pressed || !card.dragging) return
             var point = mapToItem(canvas, mouse.x, mouse.y)
             var logicalX = startLogicalX + (point.x - pressX) / canvas.factor
             var logicalY = startLogicalY + (point.y - pressY) / canvas.factor
-            var snapped = Model.snapPosition(modelData, logicalX, logicalY, root.monitors, 16)
+            var snapped = Model.snapPosition(card.modelData, logicalX, logicalY,
+              root.monitors, 16)
             card.dragX = snapped.x
             card.dragY = snapped.y
           }
@@ -1251,301 +1694,14 @@ Panel {
           onReleased: {
             if (!card.dragging) return
             card.dragging = false
-            var fields = root.displayFields(modelData)
+            var fields = root.displayFields(card.modelData)
             fields = root.withField(fields, "position",
               Math.round(card.dragX) + "x" + Math.round(card.dragY))
-            root.applyDisplay(modelData, fields)
+            if (root.selectedDisplayName === String(card.modelData.name || ""))
+              root.detailEdits = fields
+            root.applyDisplay(card.modelData, fields)
           }
         }
-      }
-    }
-  }
-
-  component MonitorRow: CursorSurface {
-    id: monitorRow
-    required property var display
-    required property int rowIndex
-
-    property bool expanded: false
-    property var edits: Model.displayFieldsFor(display, root.displayRules)
-
-    readonly property bool isFocused: display && display.focused
-    readonly property bool isVirtual: display && display.virtual
-    readonly property string castSuffix: Model.monitorSessionLabel(display, root.activeSession, root.devices)
-    readonly property bool castTarget: castSuffix !== ""
-    readonly property var modeChoices: {
-      var list = Model.monitorModes(display)
-      var mode = String(edits.mode || "")
-      if (mode !== "" && list.indexOf(mode) < 0) list.unshift(mode)
-      return list
-    }
-    readonly property var mirrorChoices: {
-      var list = ["None"]
-      for (var i = 0; i < root.monitors.length; i++) {
-        var other = root.monitors[i]
-        if (String(other.name) !== String(display.name)) list.push(String(other.name))
-      }
-      return list
-    }
-    readonly property var scaleChoices: {
-      var list = ["0.75", "1", "1.25", "1.5", "1.75", "2", "2.5", "3"]
-      var current = String(edits.scale)
-      if (current !== "" && list.indexOf(current) < 0) list.unshift(current)
-      return list
-    }
-    readonly property var orientationChoices: ["Normal", "90°", "180°", "270°"]
-
-    function resetEdits() { edits = Model.displayFieldsFor(display, root.displayRules) }
-    function update(key, value) { edits = root.withField(edits, key, value) }
-
-    onDisplayChanged: resetEdits()
-    onExpandedChanged: if (expanded) resetEdits()
-
-    hasCursor: root.cursorActive && root.focusSection === "displays" && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(monitorRow)
-    current: isFocused
-    foreground: root.foreground
-    fill: Style.hoverFillFor(root.foreground, Commons.Color.accent)
-    currentFill: Style.selectedFillFor(root.foreground, Commons.Color.accent)
-    implicitHeight: monitorColumn.implicitHeight + Style.space(10)
-
-    Column {
-      id: monitorColumn
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: parent.top
-      anchors.topMargin: Style.space(6)
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(8)
-
-      Row {
-        id: monitorInner
-        width: parent.width
-        spacing: Style.space(8)
-
-        Text {
-          textFormat: Text.PlainText
-          text: monitorRow.isVirtual ? "󰒍" : "󰍹"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: root.titleSize
-          width: Style.space(22)
-          horizontalAlignment: Text.AlignHCenter
-          anchors.verticalCenter: parent.verticalCenter
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          text: Model.monitorLabel(monitorRow.display)
-            + monitorRow.castSuffix
-            + (monitorRow.isFocused ? " · focused" : "")
-          color: monitorRow.castTarget ? Commons.Color.accent : root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: root.bodySize
-          elide: Text.ElideRight
-          width: parent.width - Style.space(22) - Style.space(14) - Style.space(34)
-            - arrangeButton.width - Style.space(24)
-          anchors.verticalCenter: parent.verticalCenter
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          text: monitorRow.castTarget ? "CAST" : (monitorRow.isVirtual ? "NET" : "")
-          visible: monitorRow.castTarget || monitorRow.isVirtual
-          color: Commons.Color.accent
-          font.family: root.fontFamily
-          font.pixelSize: root.captionSize
-          font.bold: true
-          width: Style.space(30)
-          horizontalAlignment: Text.AlignRight
-          anchors.verticalCenter: parent.verticalCenter
-        }
-
-        Button {
-          id: arrangeButton
-          text: monitorRow.expanded ? "Close" : "Arrange"
-          bordered: true
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          horizontalPadding: Style.space(4)
-          verticalPadding: Style.space(6)
-          anchors.verticalCenter: parent.verticalCenter
-          onClicked: monitorRow.expanded = !monitorRow.expanded
-        }
-      }
-
-      Column {
-        id: controls
-        width: parent.width
-        visible: monitorRow.expanded
-        spacing: Style.space(6)
-
-        Row {
-          width: parent.width
-          spacing: Style.space(8)
-
-          Column {
-            spacing: Style.space(2)
-            Text {
-              textFormat: Text.PlainText
-              text: "Mode"
-              color: Qt.darker(root.foreground, 1.4)
-              font.family: root.fontFamily
-              font.pixelSize: root.captionSize
-            }
-            ComboBox {
-              width: Style.space(160)
-              model: monitorRow.modeChoices
-              currentIndex: Math.max(0, monitorRow.modeChoices.indexOf(String(monitorRow.edits.mode)))
-              font.family: root.fontFamily
-              onActivated: monitorRow.update("mode", currentText)
-            }
-          }
-
-          Column {
-            spacing: Style.space(2)
-            Text {
-              textFormat: Text.PlainText
-              text: "Scale"
-              color: Qt.darker(root.foreground, 1.4)
-              font.family: root.fontFamily
-              font.pixelSize: root.captionSize
-            }
-            ComboBox {
-              width: Style.space(78)
-              model: monitorRow.scaleChoices
-              currentIndex: Math.max(0, monitorRow.scaleChoices.indexOf(String(monitorRow.edits.scale)))
-              font.family: root.fontFamily
-              onActivated: monitorRow.update("scale", Number(currentText))
-            }
-          }
-
-          Column {
-            spacing: Style.space(2)
-            Text {
-              textFormat: Text.PlainText
-              text: "Rotate"
-              color: Qt.darker(root.foreground, 1.4)
-              font.family: root.fontFamily
-              font.pixelSize: root.captionSize
-            }
-            ComboBox {
-              width: Style.space(96)
-              model: monitorRow.orientationChoices
-              currentIndex: Math.max(0, Math.min(3, Number(monitorRow.edits.transform || 0)))
-              font.family: root.fontFamily
-              onActivated: monitorRow.update("transform", currentIndex)
-            }
-          }
-        }
-
-        Row {
-          width: parent.width
-          spacing: Style.space(8)
-
-          Column {
-            spacing: Style.space(2)
-            Text {
-              textFormat: Text.PlainText
-              text: "Mirror"
-              color: Qt.darker(root.foreground, 1.4)
-              font.family: root.fontFamily
-              font.pixelSize: root.captionSize
-            }
-            ComboBox {
-              width: Style.space(160)
-              model: monitorRow.mirrorChoices
-              currentIndex: {
-                var mirror = String(monitorRow.edits.mirror || "")
-                var idx = monitorRow.mirrorChoices.indexOf(mirror === "" ? "None" : mirror)
-                return idx < 0 ? 0 : idx
-              }
-              font.family: root.fontFamily
-              onActivated: monitorRow.update("mirror", currentIndex === 0 ? "" : currentText)
-            }
-          }
-
-          Button {
-            text: monitorRow.edits.disabled ? "Disabled" : "Enabled"
-            bordered: true
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            horizontalPadding: Style.space(4)
-            verticalPadding: Style.space(6)
-            anchors.bottom: parent.bottom
-            onClicked: monitorRow.update("disabled", monitorRow.edits.disabled !== true)
-          }
-        }
-
-        Row {
-          width: parent.width
-          spacing: Style.space(8)
-
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width - applyButton.width - saveButton.width - Style.space(16)
-            text: "Position " + String(monitorRow.edits.position || "")
-            color: Qt.darker(root.foreground, 1.4)
-            font.family: root.fontFamily
-            font.pixelSize: root.captionSize
-            elide: Text.ElideRight
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Button {
-            id: applyButton
-            text: "Apply"
-            iconText: "󰄬"
-            bordered: true
-            enabled: !root.displayBusy
-            opacity: enabled ? 1 : 0.45
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            horizontalPadding: Style.space(4)
-            verticalPadding: Style.space(6)
-            onClicked: root.applyDisplay(monitorRow.display, monitorRow.edits)
-          }
-
-          Button {
-            id: saveButton
-            text: "Save"
-            iconText: "󰆓"
-            bordered: true
-            enabled: !root.displayBusy
-            opacity: enabled ? 1 : 0.45
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            horizontalPadding: Style.space(4)
-            verticalPadding: Style.space(6)
-            onClicked: root.saveDisplay(monitorRow.display, monitorRow.edits)
-          }
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          width: parent.width
-          visible: Model.displayRuleFor(monitorRow.display, root.displayRules) === null
-          text: monitorRow.isVirtual
-            ? "Not saved yet — use Save to persist this virtual output's layout."
-            : "No saved rule — Apply is temporary; Save writes monitors.lua (backed up)."
-          color: Qt.darker(root.foreground, 1.4)
-          font.family: root.fontFamily
-          font.pixelSize: root.captionSize
-          wrapMode: Text.Wrap
-        }
-      }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.NoButton
-      cursorShape: Qt.ArrowCursor
-      onContainsMouseChanged: if (containsMouse) {
-        root.cursorActive = true
-        root.focusSection = "displays"
-        root.selectedIndex = monitorRow.rowIndex
       }
     }
   }

@@ -20,7 +20,7 @@ Item {
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
 
   readonly property string pluginId: "tech.alatcerdas.omascreencast"
-  readonly property string pluginVersion: "0.1.0"
+  readonly property string pluginVersion: "0.1.1"
 
   // Absolute path to this plugin's bundled helper scripts, resolved relative
   // to this QML file (not OMARCHY_PATH string math) so helpers are found

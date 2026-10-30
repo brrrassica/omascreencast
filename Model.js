@@ -471,6 +471,125 @@ function snapPosition(monitor, x, y, monitors, threshold) {
   return { x: Math.round(bestX), y: Math.round(bestY) }
 }
 
+// Split a Hyprland mode string ("1920x1080@60") into its parts. Keyword modes
+// ("preferred", "highres", "highrr", "auto") return null.
+function parseMode(mode) {
+  var match = String(mode || "").trim().match(/^(\d+)x(\d+)@(\d+(?:\.\d+)?)$/)
+  if (!match) return null
+  return {
+    width: Number(match[1]),
+    height: Number(match[2]),
+    refresh: Number(match[3])
+  }
+}
+
+// Rebuild a literal mode string from a resolution ("1920x1080") and rate.
+function modeFor(resolution, refresh) {
+  var res = String(resolution || "").trim()
+  var rate = Number(refresh)
+  if (!isFinite(rate) || rate <= 0) return res
+  if (parseMode(res) !== null) return res
+  if (res === "" || res === "preferred" || res === "highres" || res === "highrr"
+      || res === "auto") return res
+  return res + "@" + String(Math.round(rate * 1000) / 1000)
+}
+
+// "1920x1080@60" -> "1920x1080"; keywords pass through unchanged.
+function resolutionOf(mode) {
+  var parsed = parseMode(mode)
+  return parsed ? parsed.width + "x" + parsed.height : String(mode || "")
+}
+
+// "1920x1080@60" -> 60; keyword modes report 60 as a safe default.
+function refreshOf(mode) {
+  var parsed = parseMode(mode)
+  return parsed ? parsed.refresh : 60
+}
+
+// Human label for a resolution: "1920 × 1080".
+function resolutionLabel(resolution) {
+  var parts = String(resolution || "").split("x")
+  if (parts.length !== 2) return String(resolution || "")
+  return parts[0] + " × " + parts[1]
+}
+
+// Inverse of resolutionLabel for ComboBox currentText round-trips.
+function resolutionFromLabel(label) {
+  return String(label || "").replace(/\s*×\s*/g, "x")
+}
+
+// Distinct resolutions advertised by a monitor, current mode first when it is
+// missing from the advertised list (e.g. a headless output).
+function resolutionChoices(monitor, mode) {
+  var out = []
+  var seen = {}
+  var modes = monitorModes(monitor)
+  for (var i = 0; i < modes.length; i++) {
+    var res = resolutionOf(modes[i])
+    if (res !== "" && seen[res] === undefined) { seen[res] = true; out.push(res) }
+  }
+  var current = resolutionOf(mode)
+  if (current !== "" && seen[current] === undefined) out.unshift(current)
+  if (out.length === 0) out.push("preferred")
+  return out
+}
+
+// Refresh rates available for one resolution, ascending.
+function refreshChoices(monitor, mode) {
+  var resolution = resolutionOf(mode)
+  var out = []
+  var seen = {}
+  var modes = monitorModes(monitor)
+  for (var i = 0; i < modes.length; i++) {
+    var parsed = parseMode(modes[i])
+    if (!parsed) continue
+    if (parsed.width + "x" + parsed.height !== resolution) continue
+    if (seen[parsed.refresh] === undefined) {
+      seen[parsed.refresh] = true
+      out.push(parsed.refresh)
+    }
+  }
+  var current = parseMode(mode)
+  if (current && seen[current.refresh] === undefined) out.push(current.refresh)
+  if (out.length === 0) out.push(current ? current.refresh : 60)
+  out.sort(function(a, b) { return a - b })
+  return out
+}
+
+var SCALE_CHOICES = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+
+// Scale values for the dropdown, keeping an unusual current value visible.
+function scaleChoices(scale) {
+  var out = SCALE_CHOICES.slice()
+  var current = Number(scale || 1)
+  if (out.indexOf(current) < 0) out.unshift(current)
+  return out
+}
+
+function scaleLabel(scale) {
+  return String(Math.round(Number(scale || 1) * 100)) + "%"
+}
+
+function scaleFromLabel(label) {
+  var percent = Number(String(label || "").replace("%", "").trim())
+  return isFinite(percent) && percent > 0 ? percent / 100 : 1
+}
+
+// Transform 0-3 rendered as an orientation phrase, like the reference UI.
+function orientationLabel(transform) {
+  var t = Number(transform || 0) % 4
+  if (t === 1) return "Portrait 90°"
+  if (t === 2) return "Landscape 180°"
+  if (t === 3) return "Portrait 270°"
+  return "Landscape 0°"
+}
+
+// True when a monitor mirrors another output.
+function isMirroring(monitor) {
+  var mirror = String(monitor && monitor.mirrorOf || "none")
+  return mirror !== "" && mirror.toLowerCase() !== "none"
+}
+
 // JSON payload handed to display_config.py apply/save.
 function displayRulePayload(monitor, fields) {
   var f = fields || {}
