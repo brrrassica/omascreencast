@@ -192,7 +192,8 @@ class HlsBuffer:
             self.seg_order.append((idx, list(part_idxs)))
             self.current_parts = [p for p in self.current_parts if p not in part_idxs]
             while len(self.seg_order) > self.keep_segments:
-                self.seg_order.pop(0)
+                old_idx, _ = self.seg_order.pop(0)
+                self.segments.pop(old_idx, None)
             self._evict_locked()
             self._render_locked()
             self._cond.notify_all()
