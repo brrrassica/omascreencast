@@ -113,6 +113,16 @@ class HlsBufferTest(unittest.TestCase):
         # The live edge is bounded to list_parts even with no segments formed.
         self.assertLessEqual(len(buf.parts), 4)
 
+    def test_segment_payloads_are_pruned(self):
+        _cast, buf = self._buffer(seg_parts=1, keep_segments=3)
+        buf.set_init(b"INIT")
+        for i in range(200):
+            part = buf.add_part(bytes([i % 256]))
+            buf.add_segment(bytes([i % 256]), [part])
+        # Evicted segments must release their payloads, not just bookkeeping.
+        self.assertLessEqual(len(buf.segments), 3)
+        self.assertEqual(len(buf.segments), len(buf.seg_order))
+
     def test_eviction_keeps_referenced_parts(self):
         _cast, buf = self._buffer(list_parts=2)
         buf.set_init(b"INIT")
