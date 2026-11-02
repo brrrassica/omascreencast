@@ -272,6 +272,37 @@ def _table_entries(call: str) -> tuple[list[dict], int, int]:
     return entries, brace, brace_close
 
 
+def _has_trailing_comma(text: str) -> bool:
+    """Return True when ``text`` ends with a comma outside comments."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text.startswith("--", i):
+            i = _skip_comment(text, i)
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out).rstrip().endswith(",")
+
+
+def _first_comment(text: str) -> int:
+    """Return the index of the first Lua comment in ``text``, or -1."""
+    i = 0
+    while i < len(text):
+        if text.startswith("--", i):
+            return i
+        if text[i] in ("'", '"'):
+            i = _skip_string(text, i)
+            continue
+        if text[i] == "[":
+            long_end = _long_bracket_end(text, i)
+            if long_end is not None:
+                i = long_end
+                continue
+        i += 1
+    return -1
+
+
 def _find_assignment(chunk: str) -> int:
     depth = 0
     i = 0
@@ -444,17 +475,25 @@ def _rewrite_call(call: str, updates: dict) -> str:
 
     missing = [k for k in updates if k not in by_key]
     if missing:
-        if not entries:
-            prefix = ""
-        elif call[:brace_close].rstrip().endswith(","):
-            prefix = " "
-        else:
-            prefix = ", "
-        addition = prefix + ", ".join(
+        fields_text = ", ".join(
             f"{key} = {render_value(key, updates[key])}"
             for key in sorted(missing, key=lambda k: _ORDER.get(k, 99))
         )
-        edits.append((brace_close, brace_close, addition))
+        if not entries:
+            edits.append((brace_close, brace_close, fields_text))
+        else:
+            # Insert before any trailing comma/comment so the comment stays at
+            # the end of the line instead of splitting a field separator.
+            last = entries[-1]
+            insert_at = last["end"]
+            comment = _first_comment(call[last["start"]:brace_close])
+            if comment >= 0:
+                insert_at = min(insert_at, last["start"] + comment)
+            tail = call[insert_at:brace_close]
+            addition = ", " + fields_text
+            if not _has_trailing_comma(tail) and _first_comment(tail) >= 0:
+                addition += ","
+            edits.append((insert_at, insert_at, addition))
 
     edits.sort(key=lambda edit: (edit[0], edit[1]))
     out: list[str] = []
