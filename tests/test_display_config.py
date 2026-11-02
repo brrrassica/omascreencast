@@ -124,6 +124,29 @@ class RewriteTest(unittest.TestCase):
         rules = [r for r in self.dc.parse_rules(updated) if r["output"] == selector]
         self.assertEqual(len(rules), 1)
 
+    def test_missing_fields_after_trailing_comma_comment(self):
+        source = '''\
+hl.monitor({
+  output = "eDP-1",
+  mode = "1920x1080@60",
+  position = "0x0",  -- laptop panel
+})
+'''
+        updated, _ = self.dc.update_rule(source, "eDP-1", {
+            "output": "eDP-1", "mode": "1920x1080@60", "position": "1920x0",
+            "scale": 1, "transform": 0, "disabled": False, "mirror": "",
+        })
+        self.assertIn('position = "1920x0", scale = 1', updated)
+        self.assertIn('mirror = "",  -- laptop panel', updated)
+        self.assertNotIn(", ,", updated)
+        self.assertNotIn(",\n,", updated)
+        rules = self.dc.parse_rules(updated)
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["fields"]["scale"], 1)
+        self.assertEqual(rules[0]["fields"]["transform"], 0)
+        self.assertFalse(rules[0]["fields"]["disabled"])
+        self.assertEqual(rules[0]["fields"]["mirror"], "")
+
     def test_unknown_output_appends_a_new_rule(self):
         selector = "HEADLESS-1"
         updated, changed = self.dc.update_rule(SOURCE, selector, {
