@@ -97,6 +97,37 @@ def _skip_comment(text: str, index: int) -> int:
     return len(text) if end < 0 else end + 1
 
 
+def _mask_comments(text: str) -> str:
+    """Blank out Lua comments while preserving length and line breaks.
+
+    Masking keeps character offsets valid, so callers can search or slice the
+    returned text and still map positions back onto the original source.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text.startswith("--", i):
+            end = _skip_comment(text, i)
+            out.append("".join("\n" if char == "\n" else " " for char in text[i:end]))
+            i = end
+            continue
+        char = text[i]
+        if char in ("'", '"'):
+            end = _skip_string(text, i)
+            out.append(text[i:end])
+            i = end
+            continue
+        if char == "[":
+            long_end = _long_bracket_end(text, i)
+            if long_end is not None:
+                out.append(text[i:long_end])
+                i = long_end
+                continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
 def _find_matching(text: str, open_index: int, open_ch: str, close_ch: str) -> int:
     """Find the matching close delimiter, skipping strings and comments."""
     depth = 0
@@ -250,13 +281,16 @@ def _table_entries(call: str) -> tuple[list[dict], int, int]:
     entries: list[dict] = []
     for rel_start, rel_end in _split_top_level(body):
         chunk = body[rel_start:rel_end]
-        eq = _find_assignment(chunk)
+        # Comments are whitespace for the purpose of locating the key/value
+        # split, but they must not become part of the key.
+        masked = _mask_comments(chunk)
+        eq = _find_assignment(masked)
         if eq < 0:
             continue
-        key = chunk[:eq].strip()
+        key = masked[:eq].strip()
         if not _KEY_RE.match(key):
             continue
-        value_raw = chunk[eq + 1:]
+        value_raw = masked[eq + 1:]
         # Offset of the trimmed value within the original call.
         lead = len(value_raw) - len(value_raw.lstrip())
         value_start = brace + 1 + rel_start + eq + 1 + lead
@@ -307,6 +341,9 @@ def _find_assignment(chunk: str) -> int:
     depth = 0
     i = 0
     while i < len(chunk):
+        if chunk.startswith("--", i):
+            i = _skip_comment(chunk, i)
+            continue
         char = chunk[i]
         if char in ("'", '"'):
             i = _skip_string(chunk, i)
@@ -645,18 +682,25 @@ def read_config(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+def _write_target(path: Path) -> Path:
+    """Return the real file for ``path`` so writes preserve a symlink."""
+    return path.resolve()
+
+
 def backup_config(path: Path) -> str:
     """Copy the current config aside with a UTC timestamp; return the backup path."""
+    target = _write_target(path)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup = path.with_suffix(path.suffix + f".omascreencast-{stamp}.bak")
-    shutil.copy2(path, backup)
-    _prune_backups(path)
+    backup = target.with_suffix(target.suffix + f".omascreencast-{stamp}.bak")
+    shutil.copy2(target, backup)
+    _prune_backups(target)
     return str(backup)
 
 
 def _backups(path: Path) -> list[Path]:
+    target = _write_target(path)
     try:
-        return sorted(path.parent.glob(path.name + ".omascreencast-*.bak"))
+        return sorted(target.parent.glob(target.name + ".omascreencast-*.bak"))
     except OSError:
         return []
 
@@ -678,13 +722,14 @@ def _prune_backups(path: Path, keep: int = 3) -> None:
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    target = _write_target(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        mode = path.stat().st_mode & 0o777
+        mode = target.stat().st_mode & 0o777
     except OSError:
         mode = None
     handle, tmp_name = tempfile.mkstemp(
-        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+        prefix=target.name + ".", suffix=".tmp", dir=str(target.parent)
     )
     tmp = Path(tmp_name)
     try:
@@ -694,9 +739,9 @@ def _atomic_write(path: Path, content: str) -> None:
             os.fsync(stream.fileno())
         if mode is not None:
             os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        os.replace(tmp, target)
         try:
-            dir_fd = os.open(path.parent, os.O_RDONLY)
+            dir_fd = os.open(target.parent, os.O_RDONLY)
             try:
                 os.fsync(dir_fd)
             finally:
