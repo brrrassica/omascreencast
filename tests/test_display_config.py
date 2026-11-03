@@ -147,6 +147,35 @@ hl.monitor({
         self.assertFalse(rules[0]["fields"]["disabled"])
         self.assertEqual(rules[0]["fields"]["mirror"], "")
 
+    def test_comment_before_field_is_skipped_when_parsing(self):
+        source = '''\
+hl.monitor({
+  output = "eDP-1",
+  mode = "1920x1080@60",
+  -- laptop panel
+  scale = 1
+})
+'''
+        fields = self.dc.parse_rules(source)[0]["fields"]
+        self.assertEqual(fields["output"], "eDP-1")
+        self.assertEqual(fields["mode"], "1920x1080@60")
+        self.assertEqual(fields["scale"], 1)
+
+    def test_comment_before_non_final_field_does_not_duplicate_it(self):
+        source = '''\
+hl.monitor({
+  output = "eDP-1",
+  -- laptop panel
+  scale = 1,
+  mode = "1920x1080@60"
+})
+'''
+        updated, _ = self.dc.update_rule(source, "eDP-1", {"scale": 1.5})
+        self.assertNotIn(",,", updated)
+        rules = [r for r in self.dc.parse_rules(updated) if r["output"] == "eDP-1"]
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["fields"]["scale"], 1.5)
+
     def test_unknown_output_appends_a_new_rule(self):
         selector = "HEADLESS-1"
         updated, changed = self.dc.update_rule(SOURCE, selector, {
@@ -307,6 +336,22 @@ class SaveRuleTest(unittest.TestCase):
         self.path.chmod(0o640)
         self.dc._atomic_write(self.path, "-- updated\n")
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o640)
+
+    def test_save_preserves_symlink_and_updates_target(self):
+        target = Path(self._tmp.name) / "real-monitors.lua"
+        target.write_text(
+            'hl.monitor({ output = "eDP-1", mode = "1920x1080@60" })\n',
+            encoding="utf-8",
+        )
+        self.path.symlink_to(target)
+        result = self.dc.save_rule(
+            self.path, {"name": "eDP-1"}, {"position": "0x0"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(self.path.is_symlink())
+        self.assertIn('position = "0x0"', target.read_text())
+        self.assertIn('position = "0x0"', self.path.read_text())
+        self.assertEqual(Path(result["backup"]).parent, target.parent)
 
     def test_backups_are_pruned(self):
         self.path.write_text(SOURCE, encoding="utf-8")
