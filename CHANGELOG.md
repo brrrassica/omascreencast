@@ -4,9 +4,33 @@ All notable changes to omascreencast are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.1] — 2026-10-30
+## [0.1.2] — 2026-11-03
 
-Latency and performance release.
+Version-consistency release: everything that landed after 0.1.1, and the version
+bump that release commit left behind. `manifest.json`, `Service.qml` and the
+documentation now report 0.1.2 consistently.
+
+### Fixed
+
+- **HLS ring buffer leaked memory.** `add_segment()` pruned `seg_order` once it
+  exceeded `keep_segments` but left the evicted segment's payload in
+  `self.segments`, so full segment bytes accumulated for the life of the
+  process. Evicted payloads are now dropped, keeping retained memory bounded.
+- **Invalid Lua when appending to `monitors.lua`.** `_rewrite_call()` inspected
+  raw text before the closing brace, so a trailing comment after a comma hid
+  the existing separator and produced an extra comma. Fields are now inserted
+  at the end of the last parsed entry with comment-aware separator detection.
+- **Dropped fields on commented rules.** `_split_top_level()` skipped comments
+  while `_find_assignment()` searched raw text, so a field following a comment
+  was lost and re-appended as a duplicate. Parsing now works on
+  length-preserving comment-masked text, keeping offsets valid.
+- **Saving through a symlinked config replaced the symlink.** `_atomic_write()`
+  created its temp file beside the link and `os.replace()` swapped the link
+  itself. Writes, `chmod`, `fsync` and backups now resolve and act on the real
+  target, so the symlink survives.
+- **“Set up” looked like it had failed.** The rootless bootstrap's `provision()`
+  returned its pre-install check snapshot; it now returns the post-install
+  `doctor()` report plus `provisioned`/`reason`.
 
 ### Added
 
@@ -16,6 +40,17 @@ Latency and performance release.
   card with resolution and refresh rate, scale, orientation, extend/mirror
   mode, and a **Turn off/Turn on** action, plus Apply (trial) and Save
   (`monitors.lua`). No separate application is required.
+- **Tracked virtual-output modes.** A bare headless output defaults to scale 2,
+  and `availableModes` lists only 1920x1080@60 even though 1600x900, 1280x720
+  and 1024x768 are accepted. `monitorModes()` now offers the known-good modes
+  for virtual outputs, while physical displays keep only their reported modes.
+
+## [0.1.1] — 2026-10-30
+
+Latency and performance release.
+
+### Added
+
 - **Tracked performance report.** [`docs/performance.md`](docs/performance.md) records the
   wired-Ethernet re-measurement (0.37 ms RTT, TTFF, fetch cadence), the LL-HLS-vs-plain-fMP4
   comparison, and the subjective glass-to-glass observations and method.

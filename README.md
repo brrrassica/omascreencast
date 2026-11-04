@@ -9,7 +9,7 @@ resize, scale, rotate, mirror, or disable — alongside your physical monitors.
 
 ![Omascreencast panel: eDP-1 and a virtual HEADLESS-1 output arranged side by side, with a Sony Bravia casting and a Panasonic TV available](preview.png)
 
-> **Status:** v0.1.1. Discovery, the virtual-monitor session (create / remove / reconcile), the
+> **Status:** v0.1.2. Discovery, the virtual-monitor session (create / remove / reconcile), the
 > capture → encode → LL-HLS → Chromecast pipeline, and the monitor arranger (drag, snap,
 > mode/scale/rotation/disable/mirror, persist) are implemented, including a rootless “Set up”
 > dependency action, crash-out reconciliation, guarded layouts, trial/keep/revert arrangement
@@ -209,7 +209,7 @@ docs/marketplace.md    # listing copy, tags/aliases, security baseline checklist
 docs/performance.md    # measured latency/performance, wired vs Wi-Fi, subjective tests
 website/               # static content for omascreencast.alatcerdas.tech
 .github/workflows/     # CI: Python tests + headless pipeline smoke
-CHANGELOG.md           # release notes (v0.1.1)
+CHANGELOG.md           # release notes (v0.1.2)
 SECURITY.md            # privilege model, stream exposure, private reporting
 THIRD_PARTY_NOTICES.md # licenses of runtime dependencies
 plans/                 # local-only roadmap (gitignored)

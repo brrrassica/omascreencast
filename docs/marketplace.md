@@ -7,7 +7,7 @@ manifest and this file in sync when the listing changes.
 |---|---|
 | **Name** | Omascreencast |
 | **Plugin id** | `tech.alatcerdas.omascreencast` |
-| **Version** | 0.1.1 |
+| **Version** | 0.1.2 |
 | **Tagline** | Use a Chromecast TV as an arrangeable virtual second monitor. |
 | **Category** | System |
 | **Aliases** | `omascreencast`, `cast-monitor`, `virtual-monitor`, `network-monitor`, `display-arranger` |
