@@ -167,6 +167,13 @@ run(mod, mod.exports, { warn: function() {}, log: console.log });
 const M = mod.exports;
 
 const monitors = M.parseMonitors(fs.readFileSync(process.argv[2], "utf8"));
+const mirrored = M.parseMonitors(JSON.stringify([
+  { id: 0, name: "eDP-1", description: "BOE 0x0A1F", width: 1920, height: 1080,
+    scale: 1, x: 0, y: 0, transform: 0, mirrorOf: "none" },
+  { id: 1, name: "HDMI-A-1", description: "Sony TV", width: 1920, height: 1080,
+    scale: 1, x: 1920, y: 0, transform: 0, mirrorOf: "0" }
+]));
+const mirroredFields = M.displayFieldsFor(mirrored[1], []);
 const ev = M.parseDiscoveryEvent(JSON.stringify({ type: "discovery", devices: [
   { uuid: "u", name: "BRAVIA", host: "1.2.3.4", port: 8009, model: "m", online: true, codecs: ["hevc", "h264"] }
 ]}));
@@ -224,7 +231,12 @@ process.stdout.write(JSON.stringify({
   overlaps: overlap,
   snapped: snapped,
   fields: fields,
-  payload: payload
+  payload: payload,
+  mirroredId: mirrored[1].id,
+  mirroredNone: mirrored[0].mirrorOf,
+  mirroredTarget: mirrored[1].mirrorOf,
+  mirroredField: mirroredFields.mirror,
+  mirroredPayload: M.displayRulePayload(mirrored[1], mirroredFields).mirror
 }));
 """
 
@@ -274,6 +286,12 @@ class ModelJsTest(unittest.TestCase):
         self.assertEqual(out["fields"]["mode"], "1920x1080@60")
         self.assertEqual(out["payload"]["description"], "BOE 0x0A1F")
         self.assertEqual(out["payload"]["scale"], 1)
+        # Hyprland's numeric mirrorOf id resolves to the mirrored output name.
+        self.assertEqual(out["mirroredId"], 1)
+        self.assertEqual(out["mirroredNone"], "")
+        self.assertEqual(out["mirroredTarget"], "eDP-1")
+        self.assertEqual(out["mirroredField"], "eDP-1")
+        self.assertEqual(out["mirroredPayload"], "eDP-1")
 
 
 if __name__ == "__main__":

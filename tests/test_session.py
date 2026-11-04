@@ -111,6 +111,15 @@ class NamingAndGeometryTest(_TempPaths):
         monitor = {"width": 3840, "height": 2160, "scale": 2}
         self.assertEqual(self.session.logical_size(monitor), (1920, 1080))
 
+    def test_logical_size_accounts_for_rotation(self):
+        monitor = {"width": 1920, "height": 1080, "scale": 1, "transform": 1}
+        self.assertEqual(self.session.logical_size(monitor), (1080, 1920))
+
+    def test_position_right_of_rotated_primary(self):
+        primary = {"x": 0, "y": 0, "width": 1920, "height": 1080,
+                   "scale": 1, "transform": 1}
+        self.assertEqual(self.session.position_right_of(primary), "1080x0")
+
     def test_position_right_of_primary(self):
         primary = {"x": 13, "y": 1080, "width": 1920, "height": 1080, "scale": 1}
         self.assertEqual(self.session.position_right_of(primary), "1933x1080")
