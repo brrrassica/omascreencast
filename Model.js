@@ -13,6 +13,7 @@ function parseMonitors(raw) {
     for (var i = 0; i < monitors.length; i++) {
       var m = monitors[i]
       list.push({
+        id: Number(m.id || 0),
         name: String(m.name || ""),
         description: String(m.description || ""),
         make: String(m.make || ""),
@@ -26,10 +27,21 @@ function parseMonitors(raw) {
         transform: Number(m.transform || 0),
         disabled: m.disabled === true,
         focused: m.focused === true,
-        mirrorOf: String(m.mirrorOf || "none"),
+        mirrorOf: m.mirrorOf === undefined || m.mirrorOf === null
+          ? "none" : String(m.mirrorOf),
         availableModes: m.availableModes instanceof Array ? m.availableModes.map(String) : [],
         virtual: String(m.name || "").indexOf("HEADLESS") === 0
       })
+    }
+    // hyprctl reports the mirrored monitor's numeric id; translate it to the
+    // output name the arranger and persisted monitor rules use.
+    var namesById = {}
+    for (var j = 0; j < list.length; j++) namesById[String(list[j].id)] = list[j].name
+    for (var k = 0; k < list.length; k++) {
+      var mirror = list[k].mirrorOf
+      if (mirror === "none" || mirror === "") list[k].mirrorOf = ""
+      else if (Object.prototype.hasOwnProperty.call(namesById, mirror))
+        list[k].mirrorOf = namesById[mirror]
     }
   } catch (e) {
     console.warn("omascreencast: parseMonitors failed: " + e)

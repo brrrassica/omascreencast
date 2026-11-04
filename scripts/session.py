@@ -437,6 +437,10 @@ def logical_size(monitor: dict) -> tuple[int, int]:
         scale = 1.0
     width = int(round((int(monitor.get("width") or 0)) / scale))
     height = int(round((int(monitor.get("height") or 0)) / scale))
+    # 90°/270° transforms swap the logical axes, matching Hyprland's layout
+    # (and Model.js:monitorLogicalSize).
+    if int(monitor.get("transform") or 0) % 2 == 1:
+        width, height = height, width
     return width, height
 
 
