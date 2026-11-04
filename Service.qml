@@ -334,13 +334,14 @@ Item {
     reconcileProc.running = true
   }
 
-  function connectDevice(device, options) {
+  function connectDevice(device, options, retry) {
     if (!device || sessionBusy) return
     if (casting) {
       lastError = "Disconnect the active session first"
       return
     }
     reconnectTimer.stop()
+    var retrying = retry === true
     var opts = options || {}
     var cmd = [pythonPath, sessionScript, "create"]
     if (device.uuid) cmd.push("--device", String(device.uuid))
@@ -354,7 +355,12 @@ Item {
     eventDetail = ""
     eventPhase = "starting"
     userInitiatedStop = false
-    reconnectAttempts = 0
+    if (retrying) {
+      pendingReconnectDevice = device
+    } else {
+      pendingReconnectDevice = null
+      reconnectAttempts = 0
+    }
     sessionBusy = true
     createProc.command = cmd
     createProc.running = true
@@ -381,6 +387,7 @@ Item {
     var target = Model.sessionTargetLabel(previous, devices)
     var shouldReconnect = autoReconnect && reconnectAttempts < 3 && device !== null
     var removeOutput = shouldReconnect || dropPolicy === "remove"
+    pendingReconnectDevice = shouldReconnect ? device : null
     var updated = {}
     for (var key in previous) {
       if (Object.prototype.hasOwnProperty.call(previous, key)) updated[key] = previous[key]
@@ -394,8 +401,6 @@ Item {
     handlingDrop = true
     lastError = ""
     if (shouldReconnect) {
-      reconnectAttempts = reconnectAttempts + 1
-      pendingReconnectDevice = device
       notify(Model.tr(uiLanguage, "tv_disconnected"),
         Model.tr(uiLanguage, "reconnecting_to") + " " + target, "critical")
       removeProc.command = [pythonPath, sessionScript, "remove"]
@@ -421,6 +426,10 @@ Item {
     sessionBusy = true
     handlingDrop = false
     pendingReconnectDevice = null
+    reconnectTimer.stop()
+    reconnectAttempts = 0
+    userInitiatedStop = true
+    stopEvents()
     teardownProc.command = [pythonPath, sessionScript, "teardown"]
     teardownProc.running = true
   }
@@ -466,6 +475,9 @@ Item {
   function handlePhaseEvent(ev) {
     if (!ev || ev.type === "") return
     if (ev.phase === "" && ev.detail === "") return
+    // A teardown is already clearing state; its engine's terminal idle is not
+    // a receiver drop. Ignore any in-flight events until it completes.
+    if (teardownProc.running) return
     var previous = activeSession || {}
     var prevPhase = String(previous.phase || "")
     if (ev.phase !== "") {
@@ -484,12 +496,15 @@ Item {
     if (ev.phase === "casting" && prevPhase !== "casting") {
       reconnectAttempts = 0
       reconnectTimer.stop()
+      pendingReconnectDevice = null
       notify(Model.tr(uiLanguage, "connected"), activeTarget, "normal")
       refreshMonitors()
     } else if (ev.phase === "error") {
       lastError = ev.detail !== "" ? ev.detail : Model.tr(uiLanguage, "cast_failed")
       notify(Model.tr(uiLanguage, "cast_failed"), lastError, "critical")
       Qt.callLater(root.reconcileSession)
+      if (autoReconnect && reconnectAttempts < 3 && pendingReconnectDevice !== null)
+        scheduleReconnect()
     } else if (ev.phase === "disconnected") {
       if (userInitiatedStop) {
         eventPhase = ""
@@ -508,14 +523,22 @@ Item {
         activeSession = null
         refreshMonitors()
         reconcileSession()
+        // A reconnect attempt whose engine died before "casting" still owns a
+        // pending target: keep retrying with backoff.
+        if (autoReconnect && reconnectAttempts < 3 && pendingReconnectDevice !== null)
+          scheduleReconnect()
       }
     }
   }
 
   function scheduleReconnect() {
-    if (!autoReconnect || reconnectAttempts >= 3) return
-    var device = Model.reconnectDeviceFromSession(activeSession)
+    if (!autoReconnect || reconnectAttempts >= 3) {
+      pendingReconnectDevice = null
+      return
+    }
+    var device = pendingReconnectDevice
     if (!device) return
+    if (reconnectTimer.running) return
     reconnectAttempts = reconnectAttempts + 1
     reconnectTimer.device = device
     reconnectTimer.interval = 3000 * reconnectAttempts
@@ -771,6 +794,11 @@ Item {
           root.lastError = r.error !== "" ? r.error : "Could not create the virtual monitor"
           root.eventPhase = ""
           root.notify(Model.tr(root.uiLanguage, "cast_failed"), root.lastError, "critical")
+          if (root.pendingReconnectDevice !== null) {
+            root.scheduleReconnect()
+          } else {
+            root.reconnectAttempts = 0
+          }
         }
         root.refreshMonitors()
         root.refreshSession()
@@ -792,25 +820,25 @@ Item {
         root.sessionBusy = false
         var reconnectDevice = root.pendingReconnectDevice
         var wasDrop = root.handlingDrop
-        root.pendingReconnectDevice = null
         root.handlingDrop = false
         if (r.ok) {
           root.activeSession = null
           root.eventPhase = ""
           root.stopEvents()
           root.userInitiatedStop = false
-          if (reconnectDevice === null) root.reconnectAttempts = 0
+          if (reconnectDevice === null) {
+            root.pendingReconnectDevice = null
+            root.reconnectAttempts = 0
+          }
           if (!wasDrop) {
             root.notify(Model.tr(root.uiLanguage, "disconnected"),
               root.deviceNickname !== "" ? root.deviceNickname : "Omascreencast", "normal")
           }
           if (r.warnings.length > 0) root.lastError = r.warnings.join("; ")
-          if (reconnectDevice !== null) {
-            root.reconnectTimer.device = reconnectDevice
-            root.reconnectTimer.interval = 1000
-            root.reconnectTimer.restart()
-          }
+          if (reconnectDevice !== null) root.scheduleReconnect()
         } else {
+          root.pendingReconnectDevice = null
+          root.reconnectAttempts = 0
           root.lastError = r.error !== "" ? r.error : "Could not stop the session"
           root.notify(Model.tr(root.uiLanguage, "cast_failed"), root.lastError, "critical")
         }
@@ -881,6 +909,8 @@ Item {
         root.stopEvents()
         root.pendingReconnectDevice = null
         root.handlingDrop = false
+        root.userInitiatedStop = false
+        root.reconnectAttempts = 0
         root.refreshMonitors()
         root.reconcileSession()
       }
@@ -1042,7 +1072,7 @@ Item {
     repeat: false
     onTriggered: {
       if (device && !root.sessionBusy && !root.casting)
-        root.connectDevice(device, root.connectOptions())
+        root.connectDevice(device, root.connectOptions(), true)
     }
   }
 

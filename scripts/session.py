@@ -696,8 +696,10 @@ def reconcile(
         cleaned_orphans.append(name)
         owned = [item for item in owned if item != name]
 
+    owned_changed = state.get("ownedOutputs") != owned
     state["ownedOutputs"] = owned
-    if result["cleaned"] or cleaned_orphans or state.get("active") is None:
+    if (result["cleaned"] or cleaned_orphans
+            or result["active"] is None or owned_changed):
         save(state)
     result["orphans"] = orphans
     result["cleanedOrphans"] = cleaned_orphans

@@ -236,6 +236,30 @@ class ReconcileTest(_TempPaths):
         self.assertEqual(stopped, [])
         self.assertEqual(result["orphans"], [])
 
+    def test_pruned_owned_outputs_are_persisted_for_active_session(self):
+        self.session.save({
+            "version": 1,
+            "active": {"name": "HEADLESS-1", "pid": 123, "phase": "casting"},
+            "ownedOutputs": ["HEADLESS-1", "HEADLESS-2"],
+        })
+        result = self.session.reconcile(
+            monitors=[{"name": "eDP-1"}, {"name": "HEADLESS-1"}],
+            alive=lambda _pid: True,
+            streams=lambda _name: [],
+        )
+        self.assertFalse(result["cleaned"])
+        self.assertEqual(result["active"]["name"], "HEADLESS-1")
+        self.assertEqual(self.session.load()["ownedOutputs"], ["HEADLESS-1"])
+        # A later output that reuses the pruned name is foreign, not ours.
+        result = self.session.reconcile(
+            monitors=[
+                {"name": "eDP-1"}, {"name": "HEADLESS-1"}, {"name": "HEADLESS-2"},
+            ],
+            alive=lambda _pid: True,
+            streams=lambda _name: [],
+        )
+        self.assertEqual(result["orphans"], ["HEADLESS-2"])
+
     def test_missing_output_is_cleaned(self):
         self._active(pid=None)
         removed = []
