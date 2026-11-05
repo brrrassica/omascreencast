@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import shutil
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -71,6 +73,32 @@ class AvahiParsingTest(unittest.TestCase):
         self.assertEqual(self.cast.parse_avahi("+;wlan0;IPv4;X;_googlecast._tcp;local"), [])
         self.assertEqual(self.cast.parse_avahi("not a record"), [])
         self.assertEqual(self.cast.parse_avahi(""), [])
+
+
+class AvahiDiscoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.cast = _load("cast_engine")
+
+    def test_avahi_uses_bare_dns_sd_service_type(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+        with mock.patch.object(self.cast.shutil, "which", return_value="/usr/bin/avahi-browse"), \
+             mock.patch.object(self.cast.subprocess, "run", return_value=completed) as run:
+            self.cast._avahi_discover(logging.getLogger("test"))
+        argv = run.call_args[0][0]
+        self.assertEqual(argv, ["avahi-browse", "-rtp", "_googlecast._tcp"])
+
+    def test_avahi_failure_is_logged(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="Invalid service type",
+        )
+        log = mock.MagicMock()
+        with mock.patch.object(self.cast.shutil, "which", return_value="/usr/bin/avahi-browse"), \
+             mock.patch.object(self.cast.subprocess, "run", return_value=completed):
+            devices = self.cast._avahi_discover(log)
+        self.assertEqual(devices, [])
+        log.warning.assert_called_once()
 
 
 class CodecCapabilityTest(unittest.TestCase):
