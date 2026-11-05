@@ -135,6 +135,24 @@ class HlsBufferTest(unittest.TestCase):
             for part in part_idxs:
                 self.assertIsNotNone(buf.get(f"part{part}.m4s"))
 
+    def test_list_parts_smaller_than_seg_parts_keeps_full_segment(self):
+        _cast, buf = self._buffer(seg_parts=8, list_parts=6)
+        buf.set_init(b"INIT")
+        parts = [buf.add_part(bytes([i])) for i in range(8)]
+        self.assertEqual(buf.get_parts(parts), bytes(range(8)))
+        buf.add_segment(bytes(range(8)), parts)
+        playlist = buf.get("stream.m3u8")[0].decode()
+        for part in parts:
+            self.assertIsNotNone(buf.get(f"part{part}.m4s"))
+            self.assertIn(f"part{part}.m4s", playlist)
+
+    def test_list_parts_below_ready_parts_still_becomes_ready(self):
+        _cast, buf = self._buffer(seg_parts=2, list_parts=1, ready_parts=2)
+        buf.set_init(b"INIT")
+        buf.add_part(b"P0")
+        buf.add_part(b"P1")
+        self.assertTrue(buf.ready())
+
 
 class HlsHandlerTest(unittest.TestCase):
     def test_serves_playlist_with_cors(self):

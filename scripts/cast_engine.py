@@ -152,9 +152,12 @@ class HlsBuffer:
         self._cond = threading.Condition()
         self.part_dur = part_dur
         self.seg_parts = seg_parts
-        self.list_parts = list_parts
         self.keep_segments = max(1, keep_segments)
         self.ready_parts = max(1, ready_parts)
+        # Keep the live edge large enough to hold a full segment and reach the
+        # ready threshold; otherwise eviction truncates the segment under
+        # assembly (and its advertised parts 404).
+        self.list_parts = max(list_parts, seg_parts, self.ready_parts)
         self.ll_parts = ll_parts
 
         self.init = b""
@@ -931,6 +934,7 @@ def _teardown(cap, ff, srv, mc, run_dir: Path, log: logging.Logger,
 # can negotiate without re-querying (feeds M3, R3).
 # ---------------------------------------------------------------------------
 SERVICE_TYPE = "_googlecast._tcp.local."
+AVAHI_SERVICE_TYPE = "_googlecast._tcp"  # avahi-browse rejects the ".local." form
 DEVICE_CACHE = STATE_DIR / "devices.json"
 DEFAULT_DISCOVERY_TIMEOUT = 3.0
 DISCOVERY_SETTLE = 5.0
@@ -1209,11 +1213,17 @@ def _avahi_discover(log: logging.Logger) -> list[Device]:
         return []
     try:
         result = subprocess.run(
-            ["avahi-browse", "-rtp", SERVICE_TYPE],
+            ["avahi-browse", "-rtp", AVAHI_SERVICE_TYPE],
             capture_output=True, text=True, timeout=6,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("avahi-browse failed: %s", exc)
+        return []
+    if result.returncode != 0:
+        log.warning(
+            "avahi-browse exited %s: %s",
+            result.returncode, (result.stderr or "").strip(),
+        )
         return []
     return parse_avahi(result.stdout)
 
