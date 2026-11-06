@@ -153,6 +153,32 @@ class HlsBufferTest(unittest.TestCase):
         buf.add_part(b"P1")
         self.assertTrue(buf.ready())
 
+    def test_stale_segment_name_is_evicted_from_sliding_window(self):
+        """A name parsed from an old playlist must not be assumed servable.
+
+        Regression guard for the headless smoke flake: the window is bounded to
+        keep_segments, so a live receiver has to re-read the playlist before it
+        fetches. If this invariant ever changes, the smoke test's re-read is no
+        longer required and this test will say so.
+        """
+        _cast, buf = self._buffer(seg_parts=1, keep_segments=2)
+        buf.set_init(b"INIT")
+        stale = buf.add_segment(b"S0", [buf.add_part(b"P0")])
+        self.assertIn(f"seg{stale}.m4s", buf.get("stream.m3u8")[0].decode())
+        # Advance past the window so the advertised name falls out of it.
+        for i in range(2):
+            buf.add_segment(bytes([i]), [buf.add_part(bytes([i]))])
+        self.assertIsNone(buf.get(f"seg{stale}.m4s"))
+        names = [
+            line for line in buf.get("stream.m3u8")[0].decode().splitlines()
+            if line.startswith("seg") and line.endswith(".m4s")
+        ]
+        # Whatever is still advertised must actually be servable.
+        self.assertTrue(names)
+        for name in names:
+            self.assertIsNotNone(buf.get(name), f"{name} advertised but 404")
+            self.assertTrue(buf.get(name)[0], f"{name} advertised but empty")
+
 
 class HlsHandlerTest(unittest.TestCase):
     def test_serves_playlist_with_cors(self):
