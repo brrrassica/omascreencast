@@ -1666,6 +1666,7 @@ Panel {
           property real pressY: 0
           property real startLogicalX: 0
           property real startLogicalY: 0
+          property bool moved: false
 
           onPressed: function(mouse) {
             canvas.selectRequested(String(card.modelData.name || ""))
@@ -1675,6 +1676,7 @@ Panel {
             pressY = point.y
             startLogicalX = Number(card.modelData.x || 0)
             startLogicalY = Number(card.modelData.y || 0)
+            moved = false
             card.dragging = true
             card.dragX = startLogicalX
             card.dragY = startLogicalY
@@ -1683,6 +1685,11 @@ Panel {
           onPositionChanged: function(mouse) {
             if (!pressed || !card.dragging) return
             var point = mapToItem(canvas, mouse.x, mouse.y)
+            if (!moved) {
+              if (Math.abs(point.x - pressX) < 3
+                  && Math.abs(point.y - pressY) < 3) return
+              moved = true
+            }
             var logicalX = startLogicalX + (point.x - pressX) / canvas.factor
             var logicalY = startLogicalY + (point.y - pressY) / canvas.factor
             var snapped = Model.snapPosition(card.modelData, logicalX, logicalY,
@@ -1694,6 +1701,9 @@ Panel {
           onReleased: {
             if (!card.dragging) return
             card.dragging = false
+            // A press without movement only selects the display; applying the
+            // unchanged layout would start an unwanted trial.
+            if (!moved) return
             var fields = root.displayFields(card.modelData)
             fields = root.withField(fields, "position",
               Math.round(card.dragX) + "x" + Math.round(card.dragY))
