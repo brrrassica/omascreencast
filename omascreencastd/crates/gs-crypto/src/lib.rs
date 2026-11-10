@@ -23,9 +23,11 @@
 
 #![deny(missing_docs)]
 
+pub mod fsutil;
 pub mod identity;
 pub mod pairing;
 pub mod paths;
+pub mod trust;
 
 pub use identity::{Identity, IdentityError};
 pub use pairing::{
@@ -34,3 +36,4 @@ pub use pairing::{
     ServerChallenge,
 };
 pub use paths::{IdentityPaths, PathError, data_dir, identity_paths, paths_under};
+pub use trust::{TrustError, TrustStore, TrustedClient, certificate_fingerprint};

@@ -13,15 +13,15 @@ Sunshine or any other GPL GameStream implementation. See
 
 | Crate | Purpose | Landed in |
 |---|---|---|
-| `gs-proto` | Wire constants, endian helpers, packed structs, XML/JSON DTOs | M1-T2 |
-| `gs-crypto` | Certificate identity, pairing state machine, trust store | M1-T3, M1-T4 (partial) |
+| `gs-proto` | Wire constants, endian helpers, packed structs, XML/JSON DTOs, IPC events | M1-T2, M1-T10 |
+| `gs-crypto` | Certificate identity, pairing state machine, trust store | M1-T3, M1-T4/T8 (partial) |
 | `gs-http` | GameStream HTTPS server and routing | stub |
 | `gs-rtsp` | RTSP parser/serialiser and SDP | stub |
 | `gs-stream` | Control channel and RTP packetisation | stub |
 | `gs-mdns` | `_nvstream._tcp` advertisement | stub |
 | `gs-capture` | Capture backends behind one trait | stub |
 | `gs-encode` | Encoder backends behind one trait | stub |
-| `osc-daemon` | Session manager, state, IPC, subcommands | scaffold |
+| `osc-daemon` | Session manager, state, IPC, subcommands | M1-T10 (IPC) |
 | `xtask` | Release and fixture helpers | scaffold |
 
 Stub crates exist so the workspace layout and CI job are fixed early; each gains
@@ -62,7 +62,30 @@ The server certificate and key live outside the plugin folder, under
 
 The identity is generated once on first run and never silently regenerated: an
 incomplete pair (one file present) is an error, because replacing half of it
-would invalidate every paired client. `clients.json` lands here with M1-T8.
+would invalidate every paired client.
+
+`clients.json` (M1-T8) sits beside them, mode `0600`, holding one record per
+paired client keyed by the SHA-256 fingerprint of its certificate. Every read
+fails closed: a corrupt file is an error rather than an empty store (an empty
+store would silently un-pair everyone), and an individual malformed record is
+quarantined and skipped rather than trusted. Inspect and remove entries with:
+
+```sh
+omascreencastd clients          # id, name, address, fingerprint
+omascreencastd unpair <id>      # idempotent
+```
+
+## IPC socket (M1-T10)
+
+The daemon publishes newline-delimited JSON events on
+`${XDG_RUNTIME_DIR}/omascreencast/daemon.sock`, mode `0600`, as described in
+plan §5.1. It is a **one-way notification stream**: the panel reads, and
+commands still go over HTTPS so they stay behind the same pairing checks.
+
+A stale socket from a crashed daemon is detected by attempting a connection and
+replaced; a socket that is actually being served is refused rather than stolen.
+Each subscriber gets a bounded queue, so a panel that stops reading is
+disconnected instead of growing daemon memory.
 
 ## Pairing (M1-T4, partial)
 

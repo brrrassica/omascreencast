@@ -12,10 +12,8 @@
 //!   half the pair would produce an identity that no paired client trusts,
 //!   while looking like a successful start.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-use std::path::Path;
+use std::fs;
+use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use openssl::asn1::Asn1Time;
@@ -26,6 +24,7 @@ use openssl::rsa::Rsa;
 use openssl::x509::extension::{BasicConstraints, KeyUsage, SubjectKeyIdentifier};
 use openssl::x509::{X509, X509NameBuilder};
 
+use crate::fsutil::write_atomic;
 use crate::paths::IdentityPaths;
 
 /// RSA key size. 2048 is the floor every Moonlight build accepts and the
@@ -191,8 +190,8 @@ impl Identity {
     /// Propagates I/O failures.
     pub fn persist(&self, paths: &IdentityPaths) -> Result<(), IdentityError> {
         fs::create_dir_all(&paths.dir).map_err(IdentityError::Io)?;
-        write_atomic(&paths.key, &self.key_pem, KEY_MODE)?;
-        write_atomic(&paths.cert, &self.cert_pem, CERT_MODE)?;
+        write_atomic(&paths.key, &self.key_pem, KEY_MODE).map_err(IdentityError::Io)?;
+        write_atomic(&paths.cert, &self.cert_pem, CERT_MODE).map_err(IdentityError::Io)?;
         Ok(())
     }
 
@@ -245,32 +244,6 @@ impl Identity {
     }
 }
 
-fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), IdentityError> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| IdentityError::Io(io::Error::other("path has no file name")))?;
-    let temp = path.with_file_name(format!(
-        ".{}.tmp-{}",
-        file_name.to_string_lossy(),
-        std::process::id()
-    ));
-    {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&temp)
-            .map_err(IdentityError::Io)?;
-        file.write_all(contents).map_err(IdentityError::Io)?;
-        file.sync_all().map_err(IdentityError::Io)?;
-    }
-    // `create_new` can inherit a permissive umask-sensitive mode only through
-    // `mode`; set it explicitly so a pre-existing umask cannot widen the key.
-    fs::set_permissions(&temp, fs::Permissions::from_mode(mode)).map_err(IdentityError::Io)?;
-    fs::rename(&temp, path).map_err(IdentityError::Io)?;
-    Ok(())
-}
-
 /// Why an identity could not be generated, loaded, or persisted.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
@@ -302,6 +275,7 @@ pub enum IdentityError {
 mod tests {
     use super::*;
     use crate::paths::paths_under;
+    use std::os::unix::fs::PermissionsExt as _;
 
     fn temp_paths() -> (tempfile::TempDir, IdentityPaths) {
         let dir = tempfile::tempdir().unwrap();

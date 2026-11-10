@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use gs_crypto::{Identity, identity_paths, paths_under};
+use gs_crypto::{Identity, TrustStore, identity_paths, paths_under};
 use tracing_subscriber::EnvFilter;
 
 /// The 0.2.0 GameStream host for omascreencast.
@@ -43,6 +43,13 @@ enum Command {
     Serve,
     /// Show or approve a pending pairing request (M1-T7).
     Pair,
+    /// List the clients that have paired with this host (M1-T8).
+    Clients,
+    /// Forget a paired client, by id (M1-T8).
+    Unpair {
+        /// Pairing id shown by `clients`.
+        id: String,
+    },
     /// Check the host's prerequisites.
     Doctor,
 }
@@ -51,8 +58,13 @@ fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
-    let result = match cli.command {
+    // The command is taken by value and everything else is read through `&Cli`,
+    // so a subcommand can carry owned arguments without borrowing the whole
+    // parsed struct.
+    let result = match &cli.command {
         Command::Identity => identity(&cli),
+        Command::Clients => clients(&cli),
+        Command::Unpair { id } => unpair(&cli, id),
         // Not yet implemented; keep the failure explicit rather than silently
         // exiting 0, so a half-built daemon is never mistaken for a working one.
         Command::Serve | Command::Pair | Command::Doctor => {
@@ -79,6 +91,41 @@ fn identity(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("bits:     {}", gs_crypto::identity::KEY_BITS);
     println!("sha256:   {}", identity.fingerprint_hex());
     Ok(())
+}
+
+fn clients(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let paths = resolved_paths(cli)?;
+    let store = TrustStore::load(&paths)?;
+    if store.is_empty() {
+        println!("no paired clients");
+        return Ok(());
+    }
+    for client in store.clients() {
+        println!(
+            "{}\t{}\t{}\t{}",
+            client.id, client.name, client.address, client.fingerprint
+        );
+    }
+    Ok(())
+}
+
+fn unpair(cli: &Cli, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let paths = resolved_paths(cli)?;
+    let mut store = TrustStore::load(&paths)?;
+    if store.remove(id, &paths)? {
+        println!("unpaired {id}");
+    } else {
+        // Idempotent: unpairing an absent client is not a failure, but say so.
+        println!("no paired client with id {id}");
+    }
+    Ok(())
+}
+
+fn resolved_paths(cli: &Cli) -> Result<gs_crypto::IdentityPaths, Box<dyn std::error::Error>> {
+    Ok(match &cli.data_dir {
+        Some(dir) => paths_under(dir),
+        None => identity_paths()?,
+    })
 }
 
 fn hostname() -> String {

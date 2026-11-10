@@ -20,9 +20,11 @@
 pub mod constants;
 pub mod dto;
 pub mod endian;
+pub mod ipc;
 pub mod packed;
 pub mod xml;
 
 pub use constants::*;
 pub use endian::Endian;
+pub use ipc::IpcEvent;
 pub use packed::{PackedError, PackedField};
