@@ -1,81 +1,54 @@
 //! GameStream HTTPS server: TLS listener with client-certificate verification,
 //! a route table, and the exact error responses the client expects.
 //!
-//! **Scaffold only.** The implementation lands in M1-T5 (`/serverinfo` in
-//! M1-T6, `/pair` in M1-T7). This file exists so the crate boundary and its
-//! dependencies are fixed before the server is written, per the M1-T1 task.
+//! # Milestone scope
+//!
+//! This crate implements M1-T5 (`gs-http` server), M1-T6 (`/serverinfo`),
+//! M1-T7 (`/pair` and the pairing phases), and the listener half of M1-T8
+//! (trusted fingerprints enforced on the routes that need them). `/applist` is
+//! served because Moonlight asks for it immediately after pairing and its shape
+//! already exists in [`gs_proto::dto`]; `/launch` and `/resume` stay unimplemented
+//! until M2.
+//!
+//! # Authorization model
+//!
+//! The TLS layer **records** the client certificate but never rejects on it.
+//! That is deliberate: an unpaired client must still reach `/serverinfo` and
+//! `/getservercert`, and a client that has not yet generated a certificate must
+//! be able to start the exchange. Authorization is enforced per route against
+//! the trust store (D16: pairing is the authorisation mechanism, not an IP
+//! allow-list).
+//!
+//! # Crypto status
+//!
+//! The pairing byte-level exchange is still the provisional
+//! [`gs_crypto::ReferenceCrypto`]. A real Moonlight client will not complete
+//! pairing until M0-T5 pins the real bytes (M1-T4 remains unticked for that
+//! reason). The HTTP shape, state transitions, IPC events, trust-store writes,
+//! and authorization decisions here are the parts that survive that change.
+//!
+//! # Clean-room note
+//!
+//! Built on the public OpenSSL API and the documented GameStream endpoint
+//! shape. No Sunshine or `moonlight-common-c` source is transcribed.
 
 #![deny(missing_docs)]
 
-/// Routes the HTTPS server is responsible for, in the order Moonlight uses them.
-///
-/// Declared now so the route table is reviewable before any handler exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Route {
-    /// `GET /serverinfo` — host capabilities and pairing state (M1-T6).
-    ServerInfo,
-    /// `GET /applist` — advertised apps (M2-T5).
-    AppList,
-    /// `GET /pair` — begin pairing (M1-T7).
-    Pair,
-    /// `GET /unpair` — forget a paired client (M1-T8).
-    Unpair,
-    /// `GET /getservercert` — serve the host certificate (M1-T4).
-    ServerCertificate,
-    /// `POST /clientchallenge` — pairing phase 1 (M1-T4).
-    ClientChallenge,
-    /// `POST /serverchallengeresp` — pairing phase 2 (M1-T4).
-    ServerChallengeResponse,
-    /// `POST /clientpairingsecret` — pairing phase 3 (M1-T4).
-    ClientPairingSecret,
-    /// `GET /launch` — create the output and return the RTSP URL (M2-T6).
-    Launch,
-    /// `GET /resume` — resume a paused session (M2-T8).
-    Resume,
-    /// `GET /cancel` — tear a session down (M2-T8).
-    Cancel,
-}
+mod handlers;
+mod query;
+mod request;
+mod route;
+mod server;
+mod state;
+mod xml;
 
-impl Route {
-    /// The path component as it appears on the wire.
-    #[must_use]
-    pub const fn path(self) -> &'static str {
-        match self {
-            Self::ServerInfo => "/serverinfo",
-            Self::AppList => "/applist",
-            Self::Pair => "/pair",
-            Self::Unpair => "/unpair",
-            Self::ServerCertificate => "/getservercert",
-            Self::ClientChallenge => "/clientchallenge",
-            Self::ServerChallengeResponse => "/serverchallengeresp",
-            Self::ClientPairingSecret => "/clientpairingsecret",
-            Self::Launch => "/launch",
-            Self::Resume => "/resume",
-            Self::Cancel => "/cancel",
-        }
-    }
-
-    /// Look up a route by its request path.
-    #[must_use]
-    pub fn from_path(path: &str) -> Option<Self> {
-        let trimmed = path.trim_end_matches('/');
-        [
-            Self::ServerInfo,
-            Self::AppList,
-            Self::Pair,
-            Self::Unpair,
-            Self::ServerCertificate,
-            Self::ClientChallenge,
-            Self::ServerChallengeResponse,
-            Self::ClientPairingSecret,
-            Self::Launch,
-            Self::Resume,
-            Self::Cancel,
-        ]
-        .into_iter()
-        .find(|route| route.path() == trimmed)
-    }
-}
+pub use handlers::parse_pin;
+pub use route::Route;
+pub use server::{HttpServer, HttpServerError, local_ipv4};
+pub use state::{
+    DEFAULT_HOSTNAME, DEFAULT_UNIQUEID, DaemonState, EventSink, HttpError, NullEventSink,
+    ServerConfig,
+};
 
 #[cfg(test)]
 mod tests {

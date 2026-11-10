@@ -36,4 +36,6 @@ pub use pairing::{
     ServerChallenge,
 };
 pub use paths::{IdentityPaths, PathError, data_dir, identity_paths, paths_under};
-pub use trust::{TrustError, TrustStore, TrustedClient, certificate_fingerprint};
+pub use trust::{
+    TrustError, TrustStore, TrustedClient, certificate_fingerprint, now_epoch_seconds,
+};

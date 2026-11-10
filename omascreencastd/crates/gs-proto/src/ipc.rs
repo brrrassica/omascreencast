@@ -82,6 +82,82 @@ pub enum IpcEvent {
     },
 }
 
+/// A local operator command sent to the daemon over the **control** socket.
+///
+/// The event stream is daemon-to-panel only; approvals cannot come from a
+/// remote client because a client must never be able to approve itself. They
+/// therefore travel over a separate local socket, which the daemon binds
+/// `0600` exactly like the event socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum IpcCommand {
+    /// List pairing requests waiting for a PIN.
+    PairingList,
+    /// Approve a pending request with the PIN shown on the TV.
+    PairingApprove {
+        /// Pairing session id.
+        id: String,
+        /// The four digits the client displayed.
+        pin: String,
+    },
+    /// Decline a pending request.
+    PairingCancel {
+        /// Pairing session id.
+        id: String,
+    },
+    /// Report host and trust state.
+    Status,
+}
+
+/// A pending pairing request, as shown to the operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingRequest {
+    /// Pairing session id.
+    pub id: String,
+    /// Client-reported device name.
+    pub name: String,
+    /// Source address the request arrived from.
+    pub address: String,
+}
+
+/// The daemon's reply to one [`IpcCommand`], one JSONL line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reply", rename_all = "snake_case")]
+pub enum CommandReply {
+    /// Response to [`IpcCommand::PairingList`].
+    PairingList {
+        /// Every request currently waiting for a PIN.
+        pending: Vec<PairingRequest>,
+    },
+    /// Response to [`IpcCommand::PairingApprove`] or
+    /// [`IpcCommand::PairingCancel`].
+    Ack {
+        /// `true` when the command took effect.
+        ok: bool,
+        /// Human-readable reason when `ok` is `false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// Response to [`IpcCommand::Status`].
+    Status {
+        /// Host name advertised to clients.
+        hostname: String,
+        /// Whether any client is paired.
+        paired: bool,
+        /// Number of paired clients.
+        paired_clients: usize,
+        /// Number of pairing requests waiting for a PIN.
+        pending: usize,
+        /// Whether a stream is active.
+        streaming: bool,
+    },
+    /// The command was not understood or could not be processed.
+    Error {
+        /// Human-readable reason.
+        detail: String,
+    },
+}
+
 impl IpcEvent {
     /// Build a `phase` event with no detail.
     #[must_use]
@@ -201,6 +277,98 @@ mod tests {
             let text = serde_json::to_string(&event).unwrap();
             assert!(!text.contains('\n'), "an event must be one JSONL line");
             assert_eq!(serde_json::from_str::<IpcEvent>(&text).unwrap(), event);
+        }
+    }
+
+    #[cfg(test)]
+    mod command_tests {
+        use super::*;
+
+        #[test]
+        fn commands_match_their_wire_names() {
+            assert_eq!(
+                serde_json::to_value(IpcCommand::PairingList).unwrap(),
+                serde_json::json!({"command": "pairing_list"})
+            );
+            assert_eq!(
+                serde_json::to_value(IpcCommand::PairingApprove {
+                    id: "9f2c".to_owned(),
+                    pin: "1234".to_owned(),
+                })
+                .unwrap(),
+                serde_json::json!({"command": "pairing_approve", "id": "9f2c", "pin": "1234"})
+            );
+            assert_eq!(
+                serde_json::to_value(IpcCommand::PairingCancel {
+                    id: "9f2c".to_owned(),
+                })
+                .unwrap(),
+                serde_json::json!({"command": "pairing_cancel", "id": "9f2c"})
+            );
+            assert_eq!(
+                serde_json::to_value(IpcCommand::Status).unwrap(),
+                serde_json::json!({"command": "status"})
+            );
+        }
+
+        #[test]
+        fn replies_match_their_wire_names() {
+            assert_eq!(
+                serde_json::to_value(CommandReply::PairingList {
+                    pending: vec![PairingRequest {
+                        id: "1".to_owned(),
+                        name: "TV".to_owned(),
+                        address: "10.0.0.2".to_owned(),
+                    }],
+                })
+                .unwrap(),
+                serde_json::json!({
+                    "reply": "pairing_list",
+                    "pending": [{"id": "1", "name": "TV", "address": "10.0.0.2"}],
+                })
+            );
+            assert_eq!(
+                serde_json::to_value(CommandReply::Ack {
+                    ok: true,
+                    detail: None,
+                })
+                .unwrap(),
+                serde_json::json!({"reply": "ack", "ok": true})
+            );
+            assert_eq!(
+                serde_json::to_value(CommandReply::Status {
+                    hostname: "host".to_owned(),
+                    paired: false,
+                    paired_clients: 0,
+                    pending: 1,
+                    streaming: false,
+                })
+                .unwrap(),
+                serde_json::json!({
+                    "reply": "status",
+                    "hostname": "host",
+                    "paired": false,
+                    "paired_clients": 0,
+                    "pending": 1,
+                    "streaming": false,
+                })
+            );
+        }
+
+        #[test]
+        fn commands_and_replies_round_trip() {
+            let command = IpcCommand::PairingApprove {
+                id: "a".to_owned(),
+                pin: "0000".to_owned(),
+            };
+            let text = serde_json::to_string(&command).unwrap();
+            assert_eq!(serde_json::from_str::<IpcCommand>(&text).unwrap(), command);
+
+            let reply = CommandReply::Error {
+                detail: "nope".to_owned(),
+            };
+            let text = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<CommandReply>(&text).unwrap(), reply);
         }
     }
 

@@ -209,8 +209,13 @@ dependencies = [
 name = "gs-http"
 version = "0.2.0"
 dependencies = [
+ "gs-crypto",
  "gs-proto",
+ "openssl",
+ "serde_json",
+ "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -368,6 +373,7 @@ version = "0.2.0"
 dependencies = [
  "clap",
  "gs-crypto",
+ "gs-http",
  "gs-proto",
  "serde_json",
  "tempfile",

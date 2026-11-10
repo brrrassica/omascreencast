@@ -162,6 +162,10 @@ pub struct PairingSession {
     pin_key: Option<[u8; KEY_LEN]>,
     client_challenge: Option<Vec<u8>>,
     server_challenge: Option<Vec<u8>>,
+    /// The host's proof of the client's challenge, retained so it can be
+    /// delivered to the client on a later request (approval may happen after
+    /// the `/clientchallenge` response was already sent).
+    server_proof: Option<Vec<u8>>,
     expected_client_proof: Option<Vec<u8>>,
 }
 
@@ -228,6 +232,23 @@ impl PairingSession {
             id: self.id.clone(),
             name: self.client.name.clone(),
             address: self.client.address.clone(),
+        }
+    }
+
+    /// The challenge response to hand the client once the operator approved.
+    ///
+    /// `None` until both the client's challenge has arrived and the PIN has
+    /// been entered. Approval can therefore happen after the client already
+    /// received its `/clientchallenge` reply; the response is delivered on the
+    /// client's next polling request.
+    #[must_use]
+    pub fn server_challenge_response(&self) -> Option<ServerChallenge> {
+        match (&self.server_challenge, &self.server_proof) {
+            (Some(challenge), Some(proof)) => Some(ServerChallenge {
+                challenge: challenge.clone(),
+                proof: proof.clone(),
+            }),
+            _ => None,
         }
     }
 
@@ -341,6 +362,7 @@ impl PairingManager {
             pin_key: None,
             client_challenge: None,
             server_challenge: None,
+            server_proof: None,
             expected_client_proof: None,
         };
         let info = session.pending_info();
@@ -377,22 +399,29 @@ impl PairingManager {
         id: &str,
         challenge: Vec<u8>,
         now: SystemTime,
-    ) -> Result<(), PairingError> {
+    ) -> Result<Option<ServerChallenge>, PairingError> {
         // Clone the crypto handle before taking the mutable session borrow:
         // both live on `self`, and the state transition needs both.
         let crypto = Arc::clone(&self.crypto);
         let session = self.mutable(id, now)?;
         session.require(PairingPhase::AwaitingClientChallenge)?;
-        session.client_challenge = Some(challenge);
+        session.client_challenge = Some(challenge.clone());
         session.phase = PairingPhase::AwaitingApproval;
-        // Approval already happened? Then issue the server challenge now.
+        // Approval already happened? Then issue the server challenge now, and
+        // hand the caller the proof it must return in this response.
         if let Some(key) = session.pin_key {
             let state = issue_server_challenge(&*crypto, &key)?;
-            session.server_challenge = Some(state.challenge);
+            let proof = crypto.server_proof(&key, &challenge)?;
+            session.server_challenge = Some(state.challenge.clone());
+            session.server_proof = Some(proof.clone());
             session.expected_client_proof = Some(state.expected_proof);
             session.phase = PairingPhase::AwaitingClientSecret;
+            return Ok(Some(ServerChallenge {
+                challenge: state.challenge,
+                proof,
+            }));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Approve a pending session with the operator's PIN.
@@ -435,12 +464,53 @@ impl PairingManager {
         let state = issue_server_challenge(&*crypto, &key)?;
         let proof = crypto.server_proof(&key, &client_challenge)?;
         session.server_challenge = Some(state.challenge.clone());
+        session.server_proof = Some(proof.clone());
         session.expected_client_proof = Some(state.expected_proof);
         session.phase = PairingPhase::AwaitingClientSecret;
         Ok(Some(ServerChallenge {
             challenge: state.challenge,
             proof,
         }))
+    }
+
+    /// Every live pending session, oldest first.
+    ///
+    /// Used by the operator-facing `pair` command and the panel: the operator
+    /// needs the list of requests waiting for a PIN, not just the newest.
+    #[must_use]
+    pub fn pending(&self, now: SystemTime) -> Vec<PendingInfo> {
+        let mut pending: Vec<&PairingSession> = self
+            .sessions
+            .values()
+            .filter(|session| {
+                session.phase.is_pending()
+                    && session.phase != PairingPhase::AwaitingClientSecret
+                    && !session.is_expired(now)
+            })
+            .collect();
+        pending.sort_by_key(|session| session.created);
+        pending
+            .iter()
+            .map(|session| session.pending_info())
+            .collect()
+    }
+
+    /// The live session opened from a given source address, if any.
+    ///
+    /// GameStream does not echo the host's pairing id on later phase requests,
+    /// so the source address is the only stable correlation the host has. When
+    /// more than one session exists for an address the newest wins: an
+    /// abandoned attempt from the same client must not shadow a fresh retry.
+    #[must_use]
+    pub fn find_by_address(&self, address: &str, now: SystemTime) -> Option<&PairingSession> {
+        self.sessions
+            .values()
+            .filter(|session| {
+                session.client.address == address
+                    && session.phase.is_pending()
+                    && !session.is_expired(now)
+            })
+            .max_by_key(|session| session.created)
     }
 
     /// Accept the client's proof (`/clientpairingsecret`).
@@ -515,7 +585,7 @@ impl PairingManager {
     }
 }
 
-/// The two values derived when a server challenge is issued.
+/// The values derived when a server challenge is issued.
 struct IssuedChallenge {
     challenge: Vec<u8>,
     expected_proof: Vec<u8>,

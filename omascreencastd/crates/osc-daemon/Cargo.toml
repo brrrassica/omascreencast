@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 gs-crypto = { workspace = true }
+gs-http = { path = "../gs-http" }
 gs-proto = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
