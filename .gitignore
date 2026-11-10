@@ -1,4 +1,9 @@
 plans/
+upstream-sunshine/
+
+# Rust workspace (omascreencastd, M1+)
+omascreencastd/target/
+target/
 
 # Python
 __pycache__/
@@ -10,3 +15,9 @@ venv/
 # Local scratch
 *.bak
 *.tmp
+*.pcap
+capture.jsonl
+
+# Spike TLS material is generated under ~/.cache; never commit a copy
+spike-cert.pem
+spike-key.pem

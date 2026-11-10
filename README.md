@@ -115,6 +115,30 @@ python3 -m unittest discover -s tests -v
 ./scripts/smoke.sh
 ```
 
+### Towards 0.2.0 (GameStream host)
+
+Work on the 0.2.0 GameStream/Moonlight transport lives under
+[`omascreencastd/`](omascreencastd/) and follows
+[`plans/towards-0.2.0.md`](plans/towards-0.2.0.md). That code is a **clean-room**
+implementation; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) before touching it.
+
+M0 spike tooling (throwaway, not product code):
+
+```sh
+# HTTPS GameStream responder that advertises _nvstream._tcp and logs every request
+python3 tools/m0-gamestream/fake_server.py \
+  --log omascreencastd/tests/fixtures/m0/spike-capture.jsonl
+
+# no TLS / no mDNS, ephemeral port (what the unit tests do)
+python3 tools/m0-gamestream/fake_server.py --no-tls --no-advertise --port 0
+```
+
+The manual spikes (the real Sunshine oracle, FEC, video-only, wire capture) are
+documented step by step in [`docs/m0-runbook.md`](docs/m0-runbook.md).
+Captured protocol traces land in
+[`omascreencastd/tests/fixtures/`](omascreencastd/tests/fixtures/README.md).
+
 Logs and opt-in debug dumps are written to `~/.local/state/omascreencast/`
 (`cast_engine.log`, plus `debug/` when `stream --debug` is used). The HLS
 segments themselves are buffered **in RAM** and never written to disk. For
