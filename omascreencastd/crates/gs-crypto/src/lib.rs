@@ -27,6 +27,7 @@ pub mod fsutil;
 pub mod identity;
 pub mod pairing;
 pub mod paths;
+pub mod replay;
 pub mod trust;
 
 pub use identity::{Identity, IdentityError};

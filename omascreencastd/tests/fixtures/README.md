@@ -20,6 +20,7 @@ omascreencastd/tests/fixtures/
     oracle-*.jsonl             # captures from the real Sunshine oracle (black box)
     README.md                  # per-capture provenance table for this drop
   http/                        # /serverinfo, /applist, /launch, /resume, /cancel
+  pairing/                     # pairing known-answer vectors (PIN, salt, challenges)
   rtsp/                        # DESCRIBE / SETUP / PLAY / TEARDOWN frames
   control/                     # control-channel handshake + ping + termination
   video/                       # first RTP video packets after PLAY
@@ -74,6 +75,45 @@ Rules for the `expect` block:
 - `body` is an exact byte match, for responses the protocol fixes completely.
 - `certificate_der_hex` is the client certificate in DER form, hex-encoded, for
   fixtures that exercise a paired route.
+
+The harness skips cleanly while the directory holds no `*.jsonl` files, so CI is
+green before the capture lands and starts asserting the moment it does.
+
+## Pairing fixture format (M1-T11)
+
+The `pairing/` directory is consumed by the replay harness in
+[`crates/gs-crypto/src/replay.rs`](../../crates/gs-crypto/src/replay.rs) and the
+integration test [`crates/gs-crypto/tests/golden_traces.rs`](../../crates/gs-crypto/tests/golden_traces.rs).
+Each `*.jsonl` file holds one capture; every non-empty, non-`#` line is one JSON
+object. A pairing fixture is a **known-answer vector**: the inputs the client and
+host exchanged, plus the values the protocol fixes for them.
+
+```json
+{
+  "name": "phase2-server-proof",
+  "pin": "1234",
+  "salt_hex": "00112233445566778899aabbccddeeff",
+  "client_challenge_hex": "0a0b0c0d0e0f10111213141516171819",
+  "server_challenge_hex": "1a1b1c1d1e1f20212223242526272829",
+  "expect": {
+    "pin_key_hex": "…",
+    "server_proof_hex": "…",
+    "client_proof_hex": "…"
+  }
+}
+```
+
+Rules for the `expect` block:
+
+- Every field is optional, but at least one must be present; a fixture that
+  asserts nothing is refused rather than counted as a pass.
+- `pin_key_hex` asserts the PIN-derived key for `pin` + `salt_hex`.
+- `server_proof_hex` asserts the host's proof of `client_challenge_hex`, and
+  requires `client_challenge_hex` to be present.
+- `client_proof_hex` asserts the value the client must return for
+  `server_challenge_hex`, and requires `server_challenge_hex` to be present.
+- All byte fields are lowercase hex. Redact nothing here: a pairing vector is
+  only useful if its inputs are the real captured bytes.
 
 The harness skips cleanly while the directory holds no `*.jsonl` files, so CI is
 green before the capture lands and starts asserting the moment it does.
