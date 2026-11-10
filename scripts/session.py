@@ -238,6 +238,59 @@ def pid_alive(pid) -> bool:
     return True
 
 
+def _proc_argv(pid) -> list[str] | None:
+    """Return a process's argv from procfs, or ``None`` when unavailable."""
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    try:
+        raw = (Path("/proc") / str(value) / "cmdline").read_bytes()
+    except OSError:
+        return None
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def _argv_is_engine(argv: list[str]) -> bool:
+    """True when ``argv`` invokes this installation's ``CAST_ENGINE``."""
+    for part in argv:
+        # Cheap prefilter before touching the filesystem.
+        if Path(part).name != CAST_ENGINE.name:
+            continue
+        try:
+            resolved = Path(part).resolve()
+        except OSError:
+            # Unresolvable (permissions/racing deletion): compare lexically.
+            if os.path.abspath(part) == str(CAST_ENGINE):
+                return True
+            continue
+        if resolved == CAST_ENGINE:
+            return True
+    return False
+
+
+def _pid_matches_engine(pid) -> bool:
+    """True unless procfs shows ``pid`` running a different program."""
+    argv = _proc_argv(pid)
+    if argv is None:
+        return True
+    return _argv_is_engine(argv)
+
+
+def pid_is_engine(pid) -> bool:
+    """True when ``pid`` is alive and not known to be a different program.
+
+    When procfs is unavailable or the command line cannot be read, fall back
+    to liveness; ``stop_process`` remains strict and never signals an
+    unverified PID.
+    """
+    if not pid_alive(pid):
+        return False
+    return _pid_matches_engine(pid)
+
+
 def _signal_tree(pid: int, sig: int) -> bool:
     """Signal the stream's process group (it is spawned in a new session)."""
     try:
@@ -267,6 +320,10 @@ def stop_process(pid, timeout: float = STREAM_STOP_TIMEOUT) -> bool:
     except (TypeError, ValueError):
         return True
     if value <= 0 or not pid_alive(value):
+        return True
+    argv = _proc_argv(value)
+    if not argv or not _argv_is_engine(argv):
+        # The PID was reused by an unrelated process: never signal it.
         return True
 
     _signal_tree(value, signal.SIGTERM)
@@ -615,6 +672,7 @@ def reconcile(
     stop=stop_process,
     remove=remove_output,
     streams=None,
+    engine=_pid_matches_engine,
 ) -> dict:
     """Converge recorded state with reality (M6 startup reconciliation).
 
@@ -645,17 +703,18 @@ def reconcile(
         reasons: list[str] = []
         name = str(active.get("name") or "")
         pid = active.get("pid")
+        pid_ours = bool(pid) and alive(pid) and engine(pid)
         phase = str(active.get("phase") or "")
         if name and name not in names:
             reasons.append("output missing")
-        if pid and not alive(pid):
+        if pid and not pid_ours:
             reasons.append("stream not running")
         if phase == "stopped" and not pid:
             reasons.append("cast stopped")
 
         if reasons:
             removed = True
-            if pid and alive(pid):
+            if pid_ours:
                 stop(pid)
             if name and name in names:
                 try:
@@ -740,7 +799,7 @@ def _create(args: argparse.Namespace) -> int:
     state = load()
     existing = state.get("active")
     if isinstance(existing, dict) and existing:
-        running = bool(existing.get("pid")) and pid_alive(existing.get("pid"))
+        running = bool(existing.get("pid")) and pid_is_engine(existing.get("pid"))
         if running and existing.get("phase") != "stopped":
             name = existing.get("name") or "a virtual output"
             raise SessionError(f"a session is already active ({name}); run 'remove' first")
@@ -880,7 +939,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     alive = False
     output_present = None
     if isinstance(active, dict) and active:
-        alive = bool(active.get("pid")) and pid_alive(active.get("pid"))
+        alive = bool(active.get("pid")) and pid_is_engine(active.get("pid"))
         name = str(active.get("name") or "")
         if name:
             try:
@@ -969,7 +1028,7 @@ def cmd_events(args: argparse.Namespace) -> int:
         current_pid = current.get("pid")
         if current_pid:
             pid = current_pid
-        if pid and not pid_alive(pid):
+        if pid and not pid_is_engine(pid):
             _emit({"type": "phase", "phase": "stopped", "detail": "stream exited"})
             return 0
         if str(current.get("phase") or "") == "stopped" and not current.get("pid"):
@@ -1033,7 +1092,7 @@ def _argv_output(argv: list[str]) -> str:
 
 
 def iter_stream_processes() -> list[tuple[int, str]]:
-    """Return ``(pid, output)`` for every running ``cast_engine.py stream``."""
+    """Return ``(pid, output)`` for our own ``cast_engine.py stream`` processes."""
     found: list[tuple[int, str]] = []
     proc_root = Path("/proc")
     if not proc_root.is_dir():
@@ -1049,7 +1108,7 @@ def iter_stream_processes() -> list[tuple[int, str]]:
         except OSError:
             continue
         argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
-        if not argv or not any(Path(part).name == "cast_engine.py" for part in argv):
+        if not argv or not _argv_is_engine(argv):
             continue
         if "stream" not in argv:
             continue
@@ -1082,7 +1141,7 @@ def teardown() -> dict:
         if name:
             names.add(name)
         pid = active.get("pid")
-        if pid and pid_alive(pid) and stop_process(pid):
+        if pid and pid_is_engine(pid) and stop_process(pid):
             stopped.append(int(pid))
 
     for pid, output in iter_stream_processes():

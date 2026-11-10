@@ -177,7 +177,7 @@ class StatusTest(_TempPaths):
         self.session.save({"version": 1, "active": {
             "name": "HEADLESS-1", "pid": 123, "phase": "casting",
         }})
-        self.session.pid_alive = lambda pid: True
+        self.session.pid_is_engine = lambda pid: True
         self.session.list_monitors = lambda: [{"name": "HEADLESS-1"}]
         payload = self.emit_command(self.session.cmd_status, argparse.Namespace())
         self.assertTrue(payload["alive"])
@@ -187,7 +187,17 @@ class StatusTest(_TempPaths):
         self.session.save({"version": 1, "active": {
             "name": "HEADLESS-1", "pid": 123, "phase": "casting",
         }})
-        self.session.pid_alive = lambda pid: False
+        self.session.pid_is_engine = lambda pid: False
+        self.session.list_monitors = lambda: [{"name": "HEADLESS-1"}]
+        payload = self.emit_command(self.session.cmd_status, argparse.Namespace())
+        self.assertFalse(payload["alive"])
+
+    def test_status_rejects_pid_reused_by_another_program(self):
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "pid": 123, "phase": "casting",
+        }})
+        self.session.pid_alive = lambda pid: True
+        self.session._pid_matches_engine = lambda pid: False
         self.session.list_monitors = lambda: [{"name": "HEADLESS-1"}]
         payload = self.emit_command(self.session.cmd_status, argparse.Namespace())
         self.assertFalse(payload["alive"])
@@ -236,6 +246,7 @@ class ReconcileTest(_TempPaths):
         result = self.session.reconcile(
             monitors=[{"name": "eDP-1"}, {"name": "HEADLESS-1"}],
             alive=lambda _pid: True,
+            engine=lambda _pid: True,
             stop=stopped.append,
             remove=removed.append,
         )
@@ -254,6 +265,7 @@ class ReconcileTest(_TempPaths):
         result = self.session.reconcile(
             monitors=[{"name": "eDP-1"}, {"name": "HEADLESS-1"}],
             alive=lambda _pid: True,
+            engine=lambda _pid: True,
             streams=lambda _name: [],
         )
         self.assertFalse(result["cleaned"])
@@ -265,6 +277,7 @@ class ReconcileTest(_TempPaths):
                 {"name": "eDP-1"}, {"name": "HEADLESS-1"}, {"name": "HEADLESS-2"},
             ],
             alive=lambda _pid: True,
+            engine=lambda _pid: True,
             streams=lambda _name: [],
         )
         self.assertEqual(result["orphans"], ["HEADLESS-2"])
@@ -351,6 +364,7 @@ class ReconcileTest(_TempPaths):
         result = self.session.reconcile(
             monitors=[{"name": "HEADLESS-1"}, {"name": "HEADLESS-2"}],
             alive=lambda _pid: True,
+            engine=lambda _pid: True,
         )
         self.assertEqual(result["orphans"], ["HEADLESS-2"])
 
@@ -471,7 +485,7 @@ class CreateLifecycleTest(_TempPaths):
         self.session.save({"version": 1, "active": {
             "name": "HEADLESS-1", "pid": 9, "phase": "casting",
         }})
-        self.session.pid_alive = lambda pid: True
+        self.session.pid_is_engine = lambda pid: True
         payload = self.emit_command(self.session.cmd_create, self._args())
         self.assertFalse(payload["ok"])
         self.assertIn("already active", payload["error"])
@@ -490,7 +504,7 @@ class EventsTest(_TempPaths):
             "name": "HEADLESS-1", "pid": 123, "phase": "casting",
             "logOffset": len(prefix),
         }})
-        self.session.pid_alive = lambda pid: True
+        self.session.pid_is_engine = lambda pid: True
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.session.cmd_events(argparse.Namespace(interval=0.01))
@@ -509,7 +523,7 @@ class EventsTest(_TempPaths):
         self.session.save({"version": 1, "active": {
             "name": "HEADLESS-1", "pid": 999, "phase": "starting", "logOffset": 0,
         }})
-        self.session.pid_alive = lambda pid: False
+        self.session.pid_is_engine = lambda pid: False
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.session.cmd_events(argparse.Namespace(interval=0.01))
