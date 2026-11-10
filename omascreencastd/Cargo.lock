@@ -266,6 +266,7 @@ name = "gs-rtsp"
 version = "0.2.0"
 dependencies = [
  "gs-proto",
+ "openssl",
  "thiserror",
 ]
 

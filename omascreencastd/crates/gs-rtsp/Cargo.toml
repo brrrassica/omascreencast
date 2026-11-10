@@ -10,6 +10,7 @@ description = "RTSP parser/serialiser, encrypted RTSP framing, and SDP builder (
 
 [dependencies]
 gs-proto = { workspace = true }
+openssl = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]

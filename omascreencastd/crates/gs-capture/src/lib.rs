@@ -10,6 +10,10 @@
 
 #![deny(missing_docs)]
 
+pub mod test_pattern;
+
+pub use test_pattern::{TestPattern, TestPatternError};
+
 use std::time::Duration;
 
 /// A captured frame's metadata; the pixel payload lives in the backend.
