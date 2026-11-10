@@ -6,6 +6,40 @@ projects. They are **not** bundled or redistributed with this repository; they
 are installed by the user's distribution or provisioned on demand. Their
 licenses apply to those components, not to this project.
 
+## Clean-room provenance (D1)
+
+The GameStream host added for 0.2.0 is a **clean-room implementation** written
+from published protocol behaviour and from wire traces we capture ourselves.
+It is **not** a port, translation, or derivative of Sunshine or any other GPL
+GameStream implementation.
+
+Concretely, for everything under `omascreencastd/` and `tools/m0-gamestream/`:
+
+- Reference implementations such as [Sunshine](https://github.com/LizardByte/Sunshine)
+  (GPL-3.0) are treated as **black boxes** — observed over the network, never
+  read for transcription. Any `upstream-sunshine/` checkout used to build the
+  M0 oracle stays gitignored and is never copied into the workspace.
+- No Sunshine identifiers, comments, comment layout, struct definitions, or
+  constants are imported. Protocol constants come from the wire (on-the-wire
+  field values, captured traces) and from public documentation, and are
+  recorded in the trace corpus with their provenance.
+- If a cipher, packing layout, or state machine cannot be written without
+  copying GPL text, the change stops and D1 in
+  [`plans/towards-0.2.0.md`](plans/towards-0.2.0.md) is re-opened rather than
+  shipping a quiet transcription.
+
+This position is a release gate: a pull request that imports Sunshine source,
+comments, or comment structure is rejected. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Protocol compatibility references
+
+| Component | Role | License | Project |
+|---|---|---|---|
+| Moonlight for Android TV | The client this host must satisfy (not bundled) | GPL-3.0-or-later | <https://github.com/moonlight-stream/moonlight-android> |
+
+Moonlight and Sunshine are named only to describe interoperability. Omascreencast
+is an independent project and is not affiliated with or endorsed by either.
+
 | Component | Role | License | Project |
 |---|---|---|---|
 | `hyprctl` / Hyprland | Wayland compositor and output management | BSD-3-Clause | <https://hypr.land> |

@@ -1,0 +1,34 @@
+[package]
+name = "osc-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Session manager, state, IPC server, config, and subcommands for omascreencast"
+
+[lib]
+name = "osc_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "omascreencastd"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+gs-crypto = { workspace = true }
+gs-http = { path = "../gs-http" }
+gs-mdns = { path = "../gs-mdns" }
+gs-proto = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

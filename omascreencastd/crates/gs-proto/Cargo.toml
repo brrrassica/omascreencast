@@ -1,0 +1,18 @@
+[package]
+name = "gs-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "GameStream wire constants, endian helpers, packed structs, and DTOs"
+
+[dependencies]
+quick-xml = "0.37"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
