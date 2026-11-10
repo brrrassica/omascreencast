@@ -1071,7 +1071,7 @@ def parse_avahi(output: str) -> list[Device]:
         except ValueError:
             port = 8009
         props = parse_txt(fields[9])
-        host = _first_ipv4([address]) or address.strip()
+        host = _first_ipv4([address])
         if not host:
             continue
         uuid = props.get("id", "")
