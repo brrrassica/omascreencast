@@ -14,7 +14,7 @@ Sunshine or any other GPL GameStream implementation. See
 | Crate | Purpose | Landed in |
 |---|---|---|
 | `gs-proto` | Wire constants, endian helpers, packed structs, XML/JSON DTOs | M1-T2 |
-| `gs-crypto` | Certificate identity, pairing crypto, trust store | M1-T3 (identity only) |
+| `gs-crypto` | Certificate identity, pairing state machine, trust store | M1-T3, M1-T4 (partial) |
 | `gs-http` | GameStream HTTPS server and routing | stub |
 | `gs-rtsp` | RTSP parser/serialiser and SDP | stub |
 | `gs-stream` | Control channel and RTP packetisation | stub |
@@ -63,3 +63,17 @@ The server certificate and key live outside the plugin folder, under
 The identity is generated once on first run and never silently regenerated: an
 incomplete pair (one file present) is an error, because replacing half of it
 would invalidate every paired client. `clients.json` lands here with M1-T8.
+
+## Pairing (M1-T4, partial)
+
+[`crates/gs-crypto/src/pairing/`](crates/gs-crypto/src/pairing/) implements the
+protocol shell: the four phases, explicit out-of-order rejection, a five-minute
+TTL with a bounded pending store, PIN validation, and the `pairing_pending` /
+`pairing_result` IPC events from plan §5.1.
+
+The **byte-level** KDF and challenge construction are deliberately behind the
+`PairingCrypto` trait. `ReferenceCrypto` is a provisional, self-consistent
+implementation used to exercise the state machine in tests; it is **not**
+expected to interoperate with Moonlight. The M0 trace corpus (M0-T5) pins the
+real bytes, at which point a production implementation replaces it without
+touching the state machine.

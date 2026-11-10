@@ -24,7 +24,13 @@
 #![deny(missing_docs)]
 
 pub mod identity;
+pub mod pairing;
 pub mod paths;
 
 pub use identity::{Identity, IdentityError};
+pub use pairing::{
+    ClientInfo, DEFAULT_MAX_PENDING, PairedClient, PairingCrypto, PairingError, PairingEvent,
+    PairingManager, PairingPhase, PairingSession, PendingInfo, Pin, ReferenceCrypto,
+    ServerChallenge,
+};
 pub use paths::{IdentityPaths, PathError, data_dir, identity_paths, paths_under};
