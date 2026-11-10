@@ -42,6 +42,8 @@ mod server;
 mod state;
 mod xml;
 
+pub mod replay;
+
 pub use handlers::parse_pin;
 pub use route::Route;
 pub use server::{HttpServer, HttpServerError, local_ipv4};

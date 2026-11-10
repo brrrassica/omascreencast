@@ -235,6 +235,7 @@ dependencies = [
  "gs-crypto",
  "gs-proto",
  "openssl",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

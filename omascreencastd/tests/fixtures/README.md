@@ -25,6 +25,59 @@ omascreencastd/tests/fixtures/
   video/                       # first RTP video packets after PLAY
 ```
 
+## HTTP fixture format (M1-T11)
+
+The `http/` directory is consumed by the replay harness in
+[`crates/gs-http/src/replay.rs`](../../crates/gs-http/src/replay.rs) and the
+integration test [`crates/gs-http/tests/golden_traces.rs`](../../crates/gs-http/tests/golden_traces.rs).
+Each `*.jsonl` file holds one capture; every non-empty, non-`#` line is one JSON
+object.
+
+A file may open with a **server directive** describing the host the capture was
+taken against. Every fixture in the file is then replayed against a state built
+from it, so asserted fields match the capture rather than a hard-coded test host:
+
+```json
+{"server": {"hostname": "captured-host", "mac": "00:11:22:33:44:55", "local_ip": "192.168.1.2", "https_port": 47984, "rtsp_port": 48010}}
+```
+
+Each subsequent line is one **exchange**:
+
+```json
+{
+  "name": "serverinfo-unpaired",
+  "request": {
+    "method": "GET",
+    "path": "/serverinfo",
+    "query": "",
+    "headers": [["Host", "captured-host"]],
+    "body": "",
+    "address": "192.168.1.40",
+    "fingerprint": null,
+    "certificate_der_hex": null
+  },
+  "expect": {
+    "status": 200,
+    "content_type": "application/json",
+    "json": {"hostname": "captured-host", "PairStatus": 1}
+  }
+}
+```
+
+Rules for the `expect` block:
+
+- `status` is required; `content_type`, `json`, and `body` are optional.
+- `json` is a **subset** match: every key present must match, extra keys in the
+  response are ignored. Use it for responses with volatile fields (a `uniqueid`
+  derived from the certificate, a random challenge) and assert only the parts
+  the protocol fixes.
+- `body` is an exact byte match, for responses the protocol fixes completely.
+- `certificate_der_hex` is the client certificate in DER form, hex-encoded, for
+  fixtures that exercise a paired route.
+
+The harness skips cleanly while the directory holds no `*.jsonl` files, so CI is
+green before the capture lands and starts asserting the moment it does.
+
 ## Provenance contract
 
 Every captured file needs a row in its directory's `README.md` (or a sibling

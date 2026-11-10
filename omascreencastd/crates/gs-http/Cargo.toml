@@ -12,6 +12,7 @@ description = "GameStream HTTPS server, routing, and client-certificate verifica
 gs-crypto = { workspace = true }
 gs-proto = { workspace = true }
 openssl = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
