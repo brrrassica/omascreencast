@@ -1,0 +1,7 @@
+# Pinned to the exact release CI uses (see .github/workflows/ci.yml). A floating
+# channel makes every run re-resolve and re-download the toolchain; an exact
+# version keeps local and CI builds identical. Bump both together.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

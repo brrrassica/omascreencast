@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gs-proto",
+    "crates/gs-crypto",
+    "crates/gs-http",
+    "crates/gs-rtsp",
+    "crates/gs-stream",
+    "crates/gs-mdns",
+    "crates/gs-capture",
+    "crates/gs-encode",
+    "crates/osc-daemon",
+    "xtask",
+]
+
+[workspace.package]
+# The workspace version follows the plugin version in manifest.json once the
+# daemon ships (M7); until then it tracks the 0.2.0 transport work.
+version = "0.2.0"
+edition = "2024"
+# MSRV floor is edition 2024. CI pins the exact toolchain in rust-toolchain.toml
+# (1.99.1) rather than testing against this floor, so treat 1.85 as the oldest
+# compiler the syntax is expected to parse, not as a verified matrix entry.
+rust-version = "1.85"
+license = "MIT"
+authors = ["Sam Ralial <sam@alatcerdas.tech>"]
+repository = "https://github.com/brrrassica/omascreencast"
+
+[workspace.dependencies]
+gs-proto = { path = "crates/gs-proto" }
+gs-crypto = { path = "crates/gs-crypto" }
+
+clap = { version = "4", features = ["derive"] }
+openssl = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Workspace lints. CI runs `cargo clippy -- -D warnings`, so anything enabled
+# here is enforced. `unsafe_code` is forbidden outright: the protocol crates are
+# pure parsing/crypto and the daemon is expected to stay memory-safe.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+# The daemon is shipped as a prebuilt binary inside the plugin folder (D11), so
+# the release profile is tuned for size and link-time dead-code elimination.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

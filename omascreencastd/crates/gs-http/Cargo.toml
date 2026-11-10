@@ -1,0 +1,16 @@
+[package]
+name = "gs-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "GameStream HTTPS server, routing, and client-certificate verification (M1-T5)"
+
+[dependencies]
+gs-proto = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

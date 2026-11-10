@@ -10,6 +10,77 @@ permissions:
   contents: read
 
 jobs:
+  # The 0.2.0 GameStream host is a Rust workspace under omascreencastd/. It is
+  # built and tested on Arch (the target platform) in a container, with the
+  # toolchain pinned in omascreencastd/rust-toolchain.toml so local and CI builds
+  # are identical and no run re-resolves a floating channel.
+  #
+  # Caches are bind-mounted from the runner host; targets are scoped by event and
+  # ref so concurrent push and pull_request runs of the same commit cannot delete
+  # each other's artifacts. The layout follows the sibling omavrything project's
+  # CI, which this runner host is already provisioned for.
+  rust:
+    name: fmt, clippy, test (Arch, omascreencastd)
+    runs-on: [self-hosted, opencode-sam]
+    container:
+      image: archlinux:base-devel
+      volumes:
+        - /home/github-runner/ci-cache/pacman-pkg:/var/cache/pacman/pkg
+        - /home/github-runner/ci-cache/cargo:/ci/cache/cargo
+        - /home/github-runner/ci-cache/rustup:/ci/cache/rustup
+        - /home/github-runner/ci-cache/targets:/ci/cache/targets
+        - /home/github-runner/ci-cache/locks:/ci/cache/locks
+    env:
+      CARGO_HOME: /ci/cache/cargo
+      RUSTUP_HOME: /ci/cache/rustup
+      RUSTUP_TOOLCHAIN: 1.99.1
+      CARGO_TARGET_DIR: /ci/cache/targets/${{ github.repository }}/${{ github.job }}/${{ github.event_name }}-${{ github.ref_name }}
+    defaults:
+      run:
+        working-directory: omascreencastd
+    steps:
+      - name: Install dependencies (from the local pacman cache)
+        working-directory: .
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR"
+          flock /ci/cache/locks/pacman.lock \
+            pacman -Syu --noconfirm --needed --overwrite '*' git curl openssl
+
+      - uses: actions/checkout@v4
+
+      # Cargo resolves `target/` relative to the workspace root, which is
+      # omascreencastd/; point it at the persistent cache.
+      - name: Point target/ at the persistent local cache
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR"
+          rm -rf target
+          ln -s "$CARGO_TARGET_DIR" target
+      - name: Put the cached cargo/rustup shims on PATH
+        working-directory: .
+        run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Pre-install the pinned toolchain under the cache lock
+        working-directory: .
+        run: |
+          flock /ci/cache/locks/rustup.lock \
+            rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update \
+              --component rustfmt --component clippy
+
+      - name: Install Rust toolchain (reused from RUSTUP_HOME)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
   test:
     name: Python + headless smoke
     runs-on: ubuntu-latest

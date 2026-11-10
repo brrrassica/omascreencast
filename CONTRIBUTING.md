@@ -52,8 +52,18 @@ python3 -m unittest discover -s tests -v
 ./scripts/smoke.sh
 ```
 
-Rust workspace commands (`cargo build`, `cargo test`) apply once
-`omascreencastd/` is scaffolded in M1.
+The Rust workspace is scaffolded (M1-T1) and lives in
+[`omascreencastd/`](omascreencastd/). Run its gates from that directory:
+
+```sh
+cd omascreencastd
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
+
+The toolchain is pinned in `omascreencastd/rust-toolchain.toml`; do not rely on
+a floating `stable`.
 
 ## Pull requests
 

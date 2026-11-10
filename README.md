@@ -139,6 +139,19 @@ documented step by step in [`docs/m0-runbook.md`](docs/m0-runbook.md).
 Captured protocol traces land in
 [`omascreencastd/tests/fixtures/`](omascreencastd/tests/fixtures/README.md).
 
+The daemon workspace is scaffolded (M1-T1). Build and test it with:
+
+```sh
+cd omascreencastd
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+cargo run -p osc-daemon -- identity   # create/load the server identity
+```
+
+See [`omascreencastd/README.md`](omascreencastd/README.md) for the crate map and
+the identity storage layout.
+
 Logs and opt-in debug dumps are written to `~/.local/state/omascreencast/`
 (`cast_engine.log`, plus `debug/` when `stream --debug` is used). The HLS
 segments themselves are buffered **in RAM** and never written to disk. For

@@ -1,0 +1,16 @@
+[package]
+name = "gs-stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Control channel, video/audio RTP packetisation, and pacing (M3)"
+
+[dependencies]
+gs-proto = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
