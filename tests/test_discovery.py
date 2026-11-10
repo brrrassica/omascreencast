@@ -74,6 +74,26 @@ class AvahiParsingTest(unittest.TestCase):
         self.assertEqual(self.cast.parse_avahi("not a record"), [])
         self.assertEqual(self.cast.parse_avahi(""), [])
 
+    def test_skips_ipv6_only_record(self):
+        record = (
+            '=;wlan0;IPv6;Living Room;_googlecast._tcp;local;tv.local;fe80::1234;8009;'
+            '"id=abc" "md=Chromecast" "fn=Living Room"'
+        )
+        self.assertEqual(self.cast.parse_avahi(record), [])
+
+    def test_ipv4_host_retained_when_ipv6_record_follows(self):
+        ipv4 = (
+            '=;wlan0;IPv4;Living Room;_googlecast._tcp;local;tv.local;192.168.1.5;8009;'
+            '"id=abc" "md=Chromecast" "fn=Living Room"'
+        )
+        ipv6 = (
+            '=;wlan0;IPv6;Living Room;_googlecast._tcp;local;tv.local;fe80::1234;8009;'
+            '"id=abc" "md=Chromecast" "fn=Living Room"'
+        )
+        devices = self.cast.parse_avahi("\n".join([ipv4, ipv6]))
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0].host, "192.168.1.5")
+
 
 class AvahiDiscoveryTest(unittest.TestCase):
     def setUp(self):
