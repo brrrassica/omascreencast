@@ -147,11 +147,13 @@ fn serve(
     let hub = IpcHub::new();
     let events = Arc::new(HubEventSink::new(hub.clone()));
     let event_hub = hub.clone();
+    let local_ip = gs_http::local_ipv4();
+    let uniqueid = DaemonState::derive_uniqueid(&identity);
     let config = gs_http::ServerConfig::new(
         &common_name,
-        DaemonState::derive_uniqueid(&identity),
+        &uniqueid,
         mac,
-        gs_http::local_ipv4(),
+        local_ip,
         https_port,
         rtsp_port,
     );
@@ -162,6 +164,31 @@ fn serve(
     let mut control = ControlServer::bind(control_path()?, command_handler(state.clone()))?;
     let mut https = HttpServer::bind(bind, https_port, state.clone())?;
 
+    // Advertise last, so the host is not discoverable before it can answer.
+    // A responder that cannot start is reported and skipped rather than fatal:
+    // the host is still usable by IP, and D16 authorises by pairing, not by
+    // discovery.
+    let advertisement = gs_mdns::Advertisement {
+        hostname: config.hostname.clone(),
+        uuid: config.uniqueid.clone(),
+        app_version: gs_proto::PROTOCOL_VERSION.to_owned(),
+        gfe_version: gs_proto::SERVER_FEATURE_VERSION.to_owned(),
+        address: local_ip,
+        https_port: https.local_addr().port(),
+    };
+    let advertiser = match gs_mdns::Advertiser::start(&advertisement) {
+        Ok(advertiser) => Some(advertiser),
+        Err(error) => {
+            eprintln!("omascreencastd: mDNS advertisement unavailable: {error}");
+            eprintln!(
+                "omascreencastd: Moonlight will not discover this host automatically; \
+                 connect by IP to {}",
+                https.local_addr()
+            );
+            None
+        }
+    };
+
     ipc.hub().emit(&gs_proto::ipc::IpcEvent::phase(
         gs_proto::ipc::phase::STARTING,
     ));
@@ -170,12 +197,24 @@ fn serve(
     println!("control: {}", control.path().display());
     println!("uniqueid: {}", config.uniqueid);
     println!(
+        "mdns:    {}",
+        advertiser
+            .as_ref()
+            .map_or("unavailable", gs_mdns::Advertiser::fullname)
+    );
+    println!(
         "paired:  {} client(s) in {}",
         state.paired_count(),
         paths.clients.display()
     );
 
     wait_for_shutdown();
+
+    // Withdraw before closing the listener: a client that still sees the
+    // record must not be pointed at a closed port.
+    if let Some(advertiser) = &advertiser {
+        advertiser.shutdown();
+    }
     https.shutdown();
     control.shutdown();
     ipc.shutdown();

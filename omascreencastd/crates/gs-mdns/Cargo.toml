@@ -10,6 +10,7 @@ description = "Advertise _nvstream._tcp so Moonlight discovers the host (M1-T9)"
 
 [dependencies]
 gs-proto = { workspace = true }
+mdns-sd = "0.21.7"
 thiserror = { workspace = true }
 
 [lints]
