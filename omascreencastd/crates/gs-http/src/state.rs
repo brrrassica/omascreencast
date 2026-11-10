@@ -26,6 +26,8 @@ use gs_crypto::{
 use gs_proto::dto::ServerInfo;
 use gs_proto::{PAIR_STATUS_PAIRED, PAIR_STATUS_UNPAIRED};
 
+use crate::session::{NullSessions, SessionController};
+
 /// Hostname used when `/proc` is unavailable.
 pub const DEFAULT_HOSTNAME: &str = "omascreencast";
 
@@ -75,6 +77,7 @@ struct Inner {
     paths: IdentityPaths,
     config: ServerConfig,
     events: Arc<dyn EventSink>,
+    sessions: Arc<dyn SessionController>,
     shared: Mutex<Shared>,
     clock: Clock,
 }
@@ -134,6 +137,9 @@ pub trait EventSink: std::fmt::Debug + Send + Sync {
     fn pairing_pending(&self, info: &gs_crypto::PendingInfo);
     /// A pairing attempt reached a terminal state.
     fn pairing_result(&self, id: &str, ok: bool);
+    /// A client asked to start a session (M2-T4). The default does nothing so
+    /// existing sinks and tests need no change.
+    fn session_request(&self, _mode: &str, _appid: u32) {}
 }
 
 /// An [`EventSink`] that discards everything, for tests and for a daemon run
@@ -158,6 +164,12 @@ pub enum HttpError {
     /// The route exists but is not implemented in this milestone.
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
+    /// Another client already owns the single session (D17).
+    #[error("busy: {0}")]
+    Busy(String),
+    /// A session could not be created for an operational reason.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     /// No route matched.
     #[error("not found")]
     NotFound,
@@ -174,8 +186,19 @@ impl HttpError {
             Self::BadRequest(_) => 400,
             Self::Unauthorized => 401,
             Self::NotFound => 404,
+            Self::Busy(_) => 409,
+            Self::Unavailable(_) => 503,
             Self::NotImplemented(_) => 501,
             Self::Internal(_) => 500,
+        }
+    }
+}
+
+impl From<crate::session::SessionError> for HttpError {
+    fn from(error: crate::session::SessionError) -> Self {
+        match error {
+            crate::session::SessionError::Busy(detail) => Self::Busy(detail),
+            crate::session::SessionError::Unavailable(detail) => Self::Unavailable(detail),
         }
     }
 }
@@ -222,6 +245,7 @@ impl DaemonState {
                 paths,
                 config,
                 events,
+                sessions: Arc::new(NullSessions),
                 shared: Mutex::new(Shared {
                     pairing: PairingManager::with_defaults(Arc::new(ReferenceCrypto)),
                     trust,
@@ -238,6 +262,31 @@ impl DaemonState {
             inner.clock = clock;
         }
         self
+    }
+
+    /// Install a session controller (M2-T4/T6/T8/T10 boundary).
+    ///
+    /// Must be called before the state is shared, which is why it takes `self`
+    /// and returns it like [`Self::with_clock`]. A build that never calls it
+    /// gets [`NullSessions`] and answers `/launch` with `503`.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: Arc<dyn SessionController>) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.sessions = sessions;
+        }
+        self
+    }
+
+    /// The session controller.
+    #[must_use]
+    pub fn sessions(&self) -> &dyn SessionController {
+        self.inner.sessions.as_ref()
+    }
+
+    /// Whether a stream is active, as reported by the session controller.
+    #[must_use]
+    pub fn is_streaming(&self) -> bool {
+        self.inner.sessions.is_streaming()
     }
 
     /// The current time.

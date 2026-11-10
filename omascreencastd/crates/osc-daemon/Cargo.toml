@@ -18,10 +18,12 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+gs-capture = { path = "../gs-capture" }
 gs-crypto = { workspace = true }
 gs-http = { path = "../gs-http" }
 gs-mdns = { path = "../gs-mdns" }
 gs-proto = { workspace = true }
+gs-rtsp = { path = "../gs-rtsp" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

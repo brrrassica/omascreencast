@@ -18,7 +18,8 @@ use gs_crypto::{Identity, TrustStore, identity_paths, paths_under};
 use gs_proto::ipc::{CommandReply, IpcCommand};
 use osc_daemon::control::{control_path, send_command};
 use osc_daemon::{
-    ControlServer, DaemonState, HttpServer, HubEventSink, IpcHub, IpcServer, command_handler,
+    ControlServer, DaemonState, HttpServer, HubEventSink, IpcHub, IpcServer, RtspServer,
+    SessionManager, command_handler,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -157,12 +158,17 @@ fn serve(
         https_port,
         rtsp_port,
     );
-    let state = DaemonState::new(identity, paths.clone(), config.clone(), events, trust);
+    // The session manager must be installed before the state is shared, so
+    // `/launch`, the RTSP server, and `status` all see the same one.
+    let sessions = Arc::new(SessionManager::new(hub.clone()));
+    let state = DaemonState::new(identity, paths.clone(), config.clone(), events, trust)
+        .with_sessions(sessions.clone());
 
     // Events first, so the panel can see the phase as soon as anything moves.
     let mut ipc = IpcServer::bind(osc_daemon::socket_path()?, event_hub)?;
     let mut control = ControlServer::bind(control_path()?, command_handler(state.clone()))?;
     let mut https = HttpServer::bind(bind, https_port, state.clone())?;
+    let mut rtsp = RtspServer::bind(bind, rtsp_port, sessions, hub.clone())?;
 
     // Advertise last, so the host is not discoverable before it can answer.
     // A responder that cannot start is reported and skipped rather than fatal:
@@ -193,6 +199,7 @@ fn serve(
         gs_proto::ipc::phase::STARTING,
     ));
     println!("https:   https://{}", https.local_addr());
+    println!("rtsp:    rtsp://{}", rtsp.local_addr());
     println!("event:   {}", ipc.path().display());
     println!("control: {}", control.path().display());
     println!("uniqueid: {}", config.uniqueid);
@@ -215,6 +222,12 @@ fn serve(
     if let Some(advertiser) = &advertiser {
         advertiser.shutdown();
     }
+    // Tear the session down before closing the listeners so the output is
+    // removed while the daemon still owns it (M2-T8).
+    if let Err(error) = state.sessions().cancel() {
+        eprintln!("omascreencastd: session teardown: {error}");
+    }
+    rtsp.shutdown();
     https.shutdown();
     control.shutdown();
     ipc.shutdown();

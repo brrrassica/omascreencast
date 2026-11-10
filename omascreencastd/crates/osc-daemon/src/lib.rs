@@ -10,10 +10,16 @@
 
 pub mod control;
 pub mod ipc;
+pub mod output;
+pub mod rtsp;
+pub mod session;
 
 pub use control::{ControlError, ControlServer, control_path, control_path_for, send_command};
 pub use gs_http::{DaemonState, HttpServer, ServerConfig};
 pub use ipc::{IpcError, IpcHub, IpcServer, socket_path, socket_path_for};
+pub use output::{HyprlandOutput, OutputError, OutputManager};
+pub use rtsp::{RtspServer, RtspServerError};
+pub use session::{ActiveSession, SessionManager};
 
 use std::sync::Arc;
 
@@ -51,6 +57,13 @@ impl EventSink for HubEventSink {
         self.hub.emit(&IpcEvent::PairingResult {
             id: id.to_owned(),
             ok,
+        });
+    }
+
+    fn session_request(&self, mode: &str, appid: u32) {
+        self.hub.emit(&IpcEvent::SessionRequest {
+            mode: mode.to_owned(),
+            appid,
         });
     }
 }
@@ -92,7 +105,7 @@ pub fn execute(state: &DaemonState, command: IpcCommand) -> CommandReply {
             paired: state.is_paired(),
             paired_clients: state.paired_count(),
             pending: state.pending_pairings().len(),
-            streaming: false,
+            streaming: state.is_streaming(),
         },
     }
 }

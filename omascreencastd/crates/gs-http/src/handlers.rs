@@ -16,7 +16,7 @@
 //! cannot recover from one lost packet.
 
 use gs_crypto::{PairingPhase, Pin};
-use gs_proto::dto::AppList;
+use gs_proto::dto::{AppList, LaunchParams, LaunchResponse};
 use gs_proto::xml::Element;
 
 use crate::request::Request;
@@ -59,7 +59,10 @@ impl Response {
     /// Render an [`HttpError`] in the shape the route's client expects.
     #[must_use]
     pub fn error(route: Route, error: &HttpError) -> Self {
-        let json = matches!(route, Route::ServerInfo | Route::AppList);
+        let json = matches!(
+            route,
+            Route::ServerInfo | Route::AppList | Route::Launch | Route::Resume | Route::Cancel
+        );
         let body = if json {
             serde_json::json!({"error": error.to_string()}).to_string()
         } else {
@@ -115,9 +118,9 @@ pub fn handle(state: &DaemonState, request: &Request, peer: Peer<'_>) -> Respons
         Route::ServerChallengeResponse => server_challenge_response(state, peer),
         Route::ClientPairingSecret => client_pairing_secret(state, request, peer),
         Route::Unpair => unpair(state, request),
-        Route::Launch | Route::Resume | Route::Cancel => Err(HttpError::NotImplemented(
-            "session streaming lands in M2; this host advertises no launchable session yet",
-        )),
+        Route::Launch => launch(state, request),
+        Route::Resume => resume(state, request),
+        Route::Cancel => cancel(state),
     };
     match result {
         Ok(response) => response,
@@ -249,6 +252,41 @@ fn unpair(state: &DaemonState, request: &Request) -> Result<Response, HttpError>
     Ok(xml_response(xml::status(!removed)))
 }
 
+/// `GET /launch` — create the output at the requested mode and return the RTSP
+/// URL (M2-T4/T6).
+///
+/// The session manager clamps the mode to the server caps (D14) and creates the
+/// `HEADLESS-*` output *before* this returns. A second concurrent launch is
+/// refused with `409` (D17), and an output-creation failure with `503`.
+fn launch(state: &DaemonState, request: &Request) -> Result<Response, HttpError> {
+    let params = LaunchParams::from_pairs(request.query_pairs());
+    let app_id = params.appid.unwrap_or(u32::from(gs_proto::DESKTOP_APP_ID));
+    state
+        .events()
+        .session_request(params.mode.as_deref().unwrap_or("default"), app_id);
+    state.sessions().launch(&params)?;
+    Ok(json_response(LaunchResponse::new(
+        &state.config().local_ip.to_string(),
+        state.config().rtsp_port,
+    )))
+}
+
+/// `GET /resume` — resume a paused session (M2-T8).
+fn resume(state: &DaemonState, request: &Request) -> Result<Response, HttpError> {
+    let params = LaunchParams::from_pairs(request.query_pairs());
+    state.sessions().resume(&params)?;
+    Ok(json_response(LaunchResponse::new(
+        &state.config().local_ip.to_string(),
+        state.config().rtsp_port,
+    )))
+}
+
+/// `GET /cancel` — tear the active session down (M2-T8).
+fn cancel(state: &DaemonState) -> Result<Response, HttpError> {
+    state.sessions().cancel()?;
+    Ok(xml_response(xml::status(true)))
+}
+
 fn ensure_session(state: &DaemonState, address: &str) -> Result<String, HttpError> {
     if let Some(id) = state.session_for_address(address) {
         return Ok(id);
@@ -280,6 +318,16 @@ fn xml_response(document: Element) -> Response {
     }
 }
 
+fn json_response<T: serde::Serialize>(value: T) -> Response {
+    match serde_json::to_vec(&value) {
+        Ok(body) => Response::json(body),
+        Err(error) => Response::error(
+            Route::Launch,
+            &HttpError::Internal(format!("could not serialise response: {error}")),
+        ),
+    }
+}
+
 /// Parse the four-digit PIN from an approve claim.
 ///
 /// Exposed for the daemon's `pair` subcommand so the PIN validation rule lives
@@ -299,11 +347,40 @@ pub fn parse_pin(value: &str) -> Result<Pin, HttpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SessionError;
     use crate::state::{NullEventSink, ServerConfig};
     use gs_crypto::{Identity, TrustStore};
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    /// The fingerprint of the client seeded into a trusted trust store.
+    const TRUSTED: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    fn state_with_trust() -> (TempDir, DaemonState, TrustStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = gs_crypto::paths_under(dir.path());
+        let identity = Identity::generate("host").unwrap();
+        let config = ServerConfig::new(
+            "host",
+            DaemonState::derive_uniqueid(&identity),
+            "aa:bb:cc:dd:ee:ff",
+            Ipv4Addr::new(192, 168, 1, 2),
+            47984,
+            48010,
+        );
+        let mut trust = TrustStore::empty();
+        let client = gs_crypto::TrustedClient::new("tv", "TV", "10.0.0.2", TRUSTED, 0);
+        trust.add(client, &paths).unwrap();
+        let state = DaemonState::new(
+            identity,
+            paths,
+            config,
+            Arc::new(NullEventSink),
+            trust.clone(),
+        );
+        (dir, state, trust)
+    }
 
     fn state() -> (TempDir, DaemonState) {
         let dir = tempfile::tempdir().unwrap();
@@ -324,6 +401,24 @@ mod tests {
             Arc::new(NullEventSink),
             TrustStore::empty(),
         );
+        (dir, state)
+    }
+
+    /// A paired peer, so the launch route passes authorization.
+    fn trusted_peer() -> Peer<'static> {
+        Peer {
+            address: "10.0.0.2",
+            fingerprint: Some(TRUSTED),
+            certificate_der: None,
+        }
+    }
+
+    /// A state with one trusted client and a stub session controller.
+    fn trusted_state(
+        outcome: Result<crate::LaunchOutcome, SessionError>,
+    ) -> (TempDir, DaemonState) {
+        let (dir, state, _trust) = state_with_trust();
+        let state = state.with_sessions(Arc::new(StubSessions { outcome }));
         (dir, state)
     }
 
@@ -416,10 +511,73 @@ mod tests {
     }
 
     #[test]
-    fn launch_is_not_implemented_and_requires_pairing() {
+    fn launch_requires_pairing() {
         let (_dir, state) = state();
         let response = handle(&state, &request("GET", "/launch", ""), peer("10.0.0.2"));
         assert_eq!(response.status, 401);
+    }
+
+    #[test]
+    fn launch_success_returns_the_session_url() {
+        let (_dir, state) = trusted_state(Ok(crate::LaunchOutcome {
+            mode: gs_proto::StreamMode {
+                width: 1280,
+                height: 720,
+                fps: 60,
+            },
+            session_url: String::new(),
+        }));
+        let mut request = request("GET", "/launch", "");
+        request.query = String::from("appid=1&mode=1280x720x60");
+        let response = handle(&state, &request, trusted_peer());
+        assert_eq!(response.status, 200);
+        let json: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(json["Gamesession"], "1");
+        assert_eq!(json["SessionUrl0"], "rtsp://192.168.1.2:48010");
+    }
+
+    #[test]
+    fn a_busy_session_is_a_409() {
+        let (_dir, state) =
+            trusted_state(Err(SessionError::Busy(String::from("already streaming"))));
+        let mut request = request("GET", "/launch", "");
+        request.query = String::from("mode=1920x1080x60");
+        let response = handle(&state, &request, trusted_peer());
+        assert_eq!(response.status, 409);
+    }
+
+    #[test]
+    fn an_unavailable_session_is_a_503() {
+        let (_dir, state) = trusted_state(Err(SessionError::Unavailable(String::from(
+            "no compositor",
+        ))));
+        let mut request = request("GET", "/launch", "");
+        request.query = String::from("mode=1920x1080x60");
+        let response = handle(&state, &request, trusted_peer());
+        assert_eq!(response.status, 503);
+    }
+
+    /// A [`crate::SessionController`] with a fixed result.
+    #[derive(Debug)]
+    struct StubSessions {
+        outcome: Result<crate::LaunchOutcome, SessionError>,
+    }
+
+    impl crate::SessionController for StubSessions {
+        fn launch(
+            &self,
+            _params: &gs_proto::dto::LaunchParams,
+        ) -> Result<crate::LaunchOutcome, SessionError> {
+            self.outcome.clone()
+        }
+
+        fn cancel(&self) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        fn is_streaming(&self) -> bool {
+            self.outcome.is_ok()
+        }
     }
 
     #[test]

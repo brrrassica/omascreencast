@@ -444,10 +444,12 @@ name = "osc-daemon"
 version = "0.2.0"
 dependencies = [
  "clap",
+ "gs-capture",
  "gs-crypto",
  "gs-http",
  "gs-mdns",
  "gs-proto",
+ "gs-rtsp",
  "serde_json",
  "tempfile",
  "thiserror",

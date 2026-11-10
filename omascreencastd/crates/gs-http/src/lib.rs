@@ -43,10 +43,12 @@ mod state;
 mod xml;
 
 pub mod replay;
+pub mod session;
 
 pub use handlers::parse_pin;
 pub use route::Route;
 pub use server::{HttpServer, HttpServerError, local_ipv4};
+pub use session::{LaunchOutcome, NullSessions, SessionController, SessionError};
 pub use state::{
     DEFAULT_HOSTNAME, DEFAULT_UNIQUEID, DaemonState, EventSink, HttpError, NullEventSink,
     ServerConfig,
