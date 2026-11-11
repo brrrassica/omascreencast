@@ -5,10 +5,17 @@
 # `<root status_code="404"/>` for every other path. Nothing here was hand-written
 # to fit the daemon; the assertions are the values the capture showed.
 #
+# FINDING (re-read 2026-11-11): "PairStatus": "1" here does NOT mean unpaired.
+# This host (the monitorize sunshine-1 profile) has a paired client; a fresh
+# capture against a never-paired oracle reported PairStatus: 0
+# (moonlight-discovery.jsonl). PairStatus is therefore (clients paired > 0) ?
+# 1 : 0, and the server directive now seeds `paired: true` so the replay state
+# matches the captured host.
+#
 # The `server` directive fixes the non-volatile fields the host echoed. `uniqueid`
 # is derived from the identity at replay time, so it is asserted only for shape
 # (present), never for equality.
-{"server": {"hostname": "E14G4-Omarchy Monitor 1", "mac": "00:00:00:00:00:00", "local_ip": "127.0.0.1", "https_port": 47984, "rtsp_port": 48010}}
+{"server": {"hostname": "E14G4-Omarchy Monitor 1", "mac": "00:00:00:00:00:00", "local_ip": "127.0.0.1", "https_port": 47984, "rtsp_port": 48010, "paired": true}}
 
 # FINDING: the captured host sets ExternalPort to the port that served the
 # request (47989 here), not to HttpsPort (47984). ExternalPort is therefore not

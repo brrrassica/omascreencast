@@ -121,7 +121,9 @@ fn serverinfo_is_reachable_without_a_client_certificate() {
     assert_eq!(status, 200);
     let document = gs_proto::xml::Element::parse(&body).unwrap();
     assert_eq!(document.child_text("hostname"), Some("test-host"));
-    assert_eq!(document.child_text("PairStatus"), Some("1"));
+    // A host with no paired clients reports PairStatus 0 (capture fact:
+    // moonlight-discovery.jsonl against a never-paired oracle).
+    assert_eq!(document.child_text("PairStatus"), Some("0"));
     assert_eq!(document.child_text("HttpsPort"), Some("47984"));
     assert!(document.child_text("uniqueid").unwrap().contains('-'));
 }

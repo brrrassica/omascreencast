@@ -49,10 +49,14 @@ pub const MDNS_SERVICE_TYPE: &str = "_nvstream._tcp.local.";
 pub const MDNS_VERSION: &str = "7.1.431.0";
 
 /// `PairStatus` value meaning the host has no paired clients yet.
-pub const PAIR_STATUS_UNPAIRED: u8 = 1;
+///
+/// A capture fact, not a guess: a fresh Sunshine oracle with an empty trust
+/// store reported `PairStatus: 0` and a host with paired clients reported
+/// `PairStatus: 1` (see `tests/fixtures/m0/README.md`).
+pub const PAIR_STATUS_UNPAIRED: u8 = 0;
 
 /// `PairStatus` value meaning at least one client is paired.
-pub const PAIR_STATUS_PAIRED: u8 = 0;
+pub const PAIR_STATUS_PAIRED: u8 = 1;
 
 /// `state` string for an idle host in `/serverinfo` and `/applist`.
 pub const STATE_FREE: &str = "SUNSHINE_SERVER_FREE";

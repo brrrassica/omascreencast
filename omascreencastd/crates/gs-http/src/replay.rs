@@ -62,6 +62,15 @@ pub struct ServerSpec {
     /// RTSP port the capture reported.
     #[serde(default)]
     pub rtsp_port: Option<u16>,
+    /// Whether the host had at least one paired client at capture time.
+    ///
+    /// Captures differ: `moonlight-discovery.jsonl` was taken against a fresh
+    /// host reporting `PairStatus: 0`; `oracle-unpaired.jsonl` against a host
+    /// that had a paired client and reported `PairStatus: 1`. The replay state
+    /// must match the captured pairing state or `/serverinfo` cannot agree
+    /// with the capture. Defaults to `false` (no paired clients).
+    #[serde(default)]
+    pub paired: bool,
 }
 
 impl ServerSpec {
@@ -611,7 +620,7 @@ mod tests {
             xml_expectation(
                 200,
                 200,
-                &[("hostname", "golden-host"), ("PairStatus", "1")],
+                &[("hostname", "golden-host"), ("PairStatus", "0")],
             ),
         );
         replay(&state, &ok).unwrap();

@@ -12,12 +12,25 @@ use gs_crypto::{Identity, TrustStore};
 use gs_http::replay::{ServerSpec, fixtures_dir, load_fixtures, replay_all};
 use gs_http::{DaemonState, NullEventSink, ServerConfig};
 
+/// A fixed fingerprint standing in for the host's paired client when a capture
+/// was taken against a host that had one. The captures do not include the
+/// client certificate (pairing routes were unreachable without trust), so the
+/// replay only needs the trust store to be non-empty — `PairStatus` is a count
+/// test, not an identity test.
+const CAPTURED_PAIRED_CLIENT: &str =
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
 /// Build a state for one fixture file, honouring its `server` directive.
+///
+/// A `paired: true` directive seeds one trusted client, so `/serverinfo`
+/// reports the `PairStatus` the capture showed rather than the replay host's
+/// own empty state.
 fn build_state(spec: Option<&ServerSpec>) -> (tempfile::TempDir, DaemonState) {
     let dir = tempfile::tempdir().unwrap();
     let paths = gs_crypto::paths_under(dir.path());
     let identity = Identity::generate("golden-host").unwrap();
     let uniqueid = DaemonState::derive_uniqueid(&identity);
+    let paired = spec.is_some_and(|spec| spec.paired);
     let config = match spec {
         Some(spec) => spec.to_config(uniqueid),
         None => ServerConfig::new(
@@ -29,13 +42,18 @@ fn build_state(spec: Option<&ServerSpec>) -> (tempfile::TempDir, DaemonState) {
             48010,
         ),
     };
-    let state = DaemonState::new(
-        identity,
-        paths,
-        config,
-        Arc::new(NullEventSink),
-        TrustStore::empty(),
-    );
+    let mut trust = TrustStore::empty();
+    if paired {
+        let client = gs_crypto::TrustedClient::new(
+            "captured-client",
+            "captured client",
+            "127.0.0.1",
+            CAPTURED_PAIRED_CLIENT,
+            0,
+        );
+        trust.add(client, &paths).unwrap();
+    }
+    let state = DaemonState::new(identity, paths, config, Arc::new(NullEventSink), trust);
     (dir, state)
 }
 

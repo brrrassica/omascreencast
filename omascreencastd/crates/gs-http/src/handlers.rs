@@ -464,7 +464,7 @@ mod tests {
         assert!(text.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>"));
         let doc = Element::parse(&text).unwrap();
         assert_eq!(doc.child_text("hostname"), Some("host"));
-        assert_eq!(doc.child_text("PairStatus"), Some("1"));
+        assert_eq!(doc.child_text("PairStatus"), Some("0"));
         assert_eq!(doc.child_text("HttpsPort"), Some("47984"));
     }
 

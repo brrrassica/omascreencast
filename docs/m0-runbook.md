@@ -9,9 +9,39 @@ Everything that **can** be automated is already implemented:
 
 | Task | Status | Evidence |
 |---|---|---|
-| M0-T2 — fake server | **automated** | [`tools/m0-gamestream/fake_server.py`](../tools/m0-gamestream/fake_server.py), tested by [`tests/test_m0_spike.py`](../tests/test_m0_spike.py) |
+| M0-T1 — local oracle | **mostly done** | a built Sunshine is on the box (`/usr/libexec/monitorize/sunshine`, commit `8d043f2b`) and Moonlight 6.2.0 (`moonlight-qt`, same `moonlight-common-c` stack) pairs with it. The plan asks specifically for **Moonlight for Android TV** — that leg still needs the TV reachable. Oracle commit recorded in the fixtures provenance. |
+| M0-T2 — fake server | **automated** | [`tools/m0-gamestream/fake_server.py`](../tools/m0-gamestream/fake_server.py), tested by [`tests/test_m0_spike.py`](../tests/test_m0_spike.py). Upgraded 2026-11-11 to the capture-verified wire shape: dual ports (plaintext discovery 47989 serving only `/serverinfo`, TLS control 47984), XML `<root status_code=...>` envelopes, and the **presented client certificate recorded** in every TLS log entry. |
+| M0-T3 — FEC 0 | **partial pass** | Moonlight 6.2.0 completes the full pairing exchange against the oracle with `fec_percentage = 0`. Session-level "stays up" not reached without a rendering client. Recorded in [`fixtures/m0/README.md`](../omascreencastd/tests/fixtures/m0/README.md). |
+| M0-T5 — discovery exchange | **partial** | First client-driven capture frozen: [`fixtures/http/moonlight-discovery.jsonl`](../omascreencastd/tests/fixtures/http/moonlight-discovery.jsonl), replayed by the M1-T11 golden-trace test. Session traces (`/launch`, RTSP, control, RTP) still missing. |
 | M0-T6 — clean-room wording | **done** | [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
-| M0-T7 — trace corpus scaffold | **scaffolded** | [`omascreencastd/tests/fixtures/README.md`](../omascreencastd/tests/fixtures/README.md) — captures pending the spikes below |
+| M0-T7 — trace corpus | **partially frozen** | [`omascreencastd/tests/fixtures/README.md`](../omascreencastd/tests/fixtures/README.md) plus the two `http/` captures with provenance rows. |
+
+## The no-TV recipe (discovered 2026-11-11)
+
+`moonlight-qt` on the host speaks the same `moonlight-common-c` protocol as
+Moonlight for Android TV, and its CLI can complete the whole pairing handshake
+without a TV — this is how the first client-driven captures were taken:
+
+```sh
+# 1. Start the oracle reading its PIN from a fifo:
+cd /tmp && mkfifo pin.fifo
+(sleep 600 > pin.fifo) &            # feeder blocks until sunshine opens it
+/usr/libexec/monitorize/sunshine <conf> -0 < pin.fifo > sunshine.log 2>&1 &
+
+# 2. Start the capture (root), then pair with the PIN the feeder holds:
+nohup timeout 300 tshark -i lo -s0 -w /tmp/m0.pcap \
+  'tcp port 47984 or tcp port 47989 or tcp port 48010 or udp' &
+moonlight pair <host-ip> --pin 9662
+
+# 3. Extract: -Y http.request / -Y http.response on 47989 gives the
+#    discovery exchange verbatim; 47984 payloads are opaque (the client does
+#    not write an SSLKEYLOGFILE), so pairing vectors need the fake server —
+#    its TLS socket has CERT_OPTIONAL and logs the client certificate + bodies.
+```
+
+The `pairing/`, `rtsp/`, `control/`, and `video/` corpora still need a client
+that can render a session (the GUI `stream` path on a desktop session, or the
+TV itself); the headless CLI stream attempt does not reach `PLAY` here.
 
 The tasks below are **manual**. Run them in order on the machine that will host
 the stream, then record each answer in the trace corpus and tick the box in the
@@ -224,9 +254,10 @@ spike was blocked, record that as a finding rather than filling the gap by hand.
 
 M0 is done when:
 
-- [ ] M0-T1 oracle connects and pairs (recorded).
-- [ ] M0-T3 `fecPercentage=0` has a recorded pass/fail (or a recorded "blocked by
-      pairing" with a follow-up).
+- [x] M0-T1 oracle connects and pairs (recorded; desktop Moonlight 6.2.0 —
+      Android TV leg pending the physical TV).
+- [x] M0-T3 `fecPercentage=0` has a recorded pass up to pairing (session leg
+      pending a rendering client); no negative signal (D5 stands for now).
 - [ ] M0-T4 video-only has a recorded pass/fail.
 - [ ] M0-T5 exchanges are captured.
 - [ ] M0-T7 corpus is committed with provenance and a regeneration note.

@@ -1,0 +1,26 @@
+# Captured from Moonlight 6.2.0 (moonlight-qt CLI) driving a fresh local
+# Sunshine oracle on loopback, 2026-11-11. Provenance in ../../m0/README.md.
+#
+# This is the first **client-driven** capture in the corpus: the requests are
+# what a real Moonlight build sends during discovery, not a curl stand-in.
+# Transport is plaintext HTTP on 47989, captured with tshark on `lo`
+# (see m0/README.md for the exact command).
+#
+# FINDING (supersedes an assumption): a fresh host with **no paired clients**
+# reports `PairStatus: 0`. The earlier `oracle-unpaired.jsonl` capture, taken
+# against a host that had a paired client, reported `PairStatus: 1`. The two
+# captures are consistent with `PairStatus = (number of paired clients > 0)`,
+# i.e. 0 == nothing paired, 1 == something is paired — the opposite of the
+# daemon's current "1 == unpaired" reading. Until an A/B capture pins how
+# Moonlight interprets the value, this fixture asserts what the capture shows
+# and the divergence is recorded, not papered over.
+#
+# `GfeVersion` is present-asserted only: the oracle reports "3.23.0.74" while
+# this daemon reports "7.1.431.0" (SERVER_FEATURE_VERSION). Moonlight accepted
+# both during discovery, so the exact value is not pinned by this capture;
+# which of the two a real TV requires is still an open M0 question.
+{"server": {"hostname": "oma-oracle", "mac": "00:00:00:00:00:00", "local_ip": "127.0.0.1", "https_port": 47984, "rtsp_port": 48010}}
+
+{"name": "moonlight-discovery-serverinfo", "request": {"method": "GET", "path": "/serverinfo", "query": "uniqueid=4e978cac61ca44d0&uuid=c5355e5ea20542fdbbe7b1d277319ab7", "headers": [["Host", "127.0.0.1:47989"], ["User-Agent", "Mozilla/5.0"], ["Connection", "Keep-Alive"], ["Accept-Encoding", "gzip"]], "address": "127.0.0.1"}, "expect": {"status": 200, "content_type": "application/xml", "xml": {"status_code": 200, "children": [["hostname", "oma-oracle"], ["appversion", "7.1.431.-1"], ["HttpsPort", "47984"], ["mac", "00:00:00:00:00:00"], ["LocalIP", "127.0.0.1"], ["PairStatus", "0"], ["currentgame", "0"], ["state", "SUNSHINE_SERVER_FREE"]], "present": ["uniqueid", "GfeVersion", "ExternalPort", "ServerCodecModeSupport"]}}}
+
+{"name": "moonlight-discovery-repeats-with-a-fresh-uuid", "request": {"method": "GET", "path": "/serverinfo", "query": "uniqueid=4e978cac61ca44d0&uuid=a29dbe022ba14558a3bb44f26d7a9349", "headers": [["Host", "127.0.0.1:47989"], ["User-Agent", "Mozilla/5.0"]], "address": "127.0.0.1"}, "expect": {"status": 200, "content_type": "application/xml", "xml": {"status_code": 200, "children": [["hostname", "oma-oracle"], ["PairStatus", "0"]]}}}

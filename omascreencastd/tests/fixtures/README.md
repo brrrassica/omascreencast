@@ -39,8 +39,14 @@ taken against. Every fixture in the file is then replayed against a state built
 from it, so asserted fields match the capture rather than a hard-coded test host:
 
 ```json
-{"server": {"hostname": "captured-host", "mac": "00:11:22:33:44:55", "local_ip": "192.168.1.2", "https_port": 47984, "rtsp_port": 48010}}
+{"server": {"hostname": "captured-host", "mac": "00:11:22:33:44:55", "local_ip": "192.168.1.2", "https_port": 47984, "rtsp_port": 48010, "paired": false}}
 ```
+
+`paired` defaults to `false` and says whether the captured host had at least
+one paired client — the captures differ (`moonlight-discovery.jsonl` was a
+never-paired host with `PairStatus: 0`; `oracle-unpaired.jsonl` had one, with
+`PairStatus: 1`), and the replayed `/serverinfo` must agree with whichever was
+captured.
 
 Each subsequent line is one **exchange**:
 
