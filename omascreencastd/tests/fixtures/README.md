@@ -118,6 +118,48 @@ Rules for the `expect` block:
 The harness skips cleanly while the directory holds no `*.jsonl` files, so CI is
 green before the capture lands and starts asserting the moment it does.
 
+## RTSP fixture format (M2-T9)
+
+The `rtsp/` directory is consumed by the replay harness in
+[`crates/gs-rtsp/src/replay.rs`](../../crates/gs-rtsp/src/replay.rs) and the
+integration test [`crates/gs-rtsp/tests/golden_traces.rs`](../../crates/gs-rtsp/tests/golden_traces.rs).
+Each `*.jsonl` file holds one capture; every non-empty, non-`#` line is one JSON
+object. A fixture is one or two captured wire messages plus the fields the
+protocol fixes for them.
+
+```json
+{
+  "name": "describe-request",
+  "request_wire": "DESCRIBE rtsp://192.168.1.2:48010 RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n",
+  "expect_request": {
+    "method": "DESCRIBE",
+    "uri": "rtsp://192.168.1.2:48010",
+    "cseq": 2,
+    "headers": [["Accept", "application/sdp"]],
+    "body": ""
+  }
+}
+```
+
+Rules for the fixture:
+
+- At least one of `request_wire`/`response_wire` must be present; a fixture with
+  neither is refused rather than counted as a pass.
+- `*_wire` is the **exact captured bytes**, with `\r\n` JSON-escaped. The replay
+  asserts the parser consumes exactly those bytes and no more (framing check).
+- `expect_request` / `expect_response` fields are all optional and are asserted
+  individually: `method`/`status`/`reason`/`uri`, numeric `cseq`, header pairs,
+  and `body`.
+- `rtspenc_key_hex` is the 16-byte `rikey` the host sent on `/launch`, for a
+  capture that used encrypted RTSP. When present, each wire message is also
+  round-tripped through [`gs_rtsp::RtspCipher`](../../crates/gs-rtsp/src/encrypt.rs),
+  asserting the `ciphertext || tag` framing and that decryption reproduces the
+  capture. Both directions start at sequence zero, so a multi-message encrypted
+  capture should be split into one fixture per message.
+
+The harness skips cleanly while the directory holds no `*.jsonl` files, so CI is
+green before the capture lands and starts asserting the moment it does.
+
 ## Provenance contract
 
 Every captured file needs a row in its directory's `README.md` (or a sibling

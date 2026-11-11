@@ -18,6 +18,7 @@
 
 pub mod encrypt;
 pub mod message;
+pub mod replay;
 pub mod sdp;
 
 pub use encrypt::{RtspCipher, RtspCryptoError, RtspKey};

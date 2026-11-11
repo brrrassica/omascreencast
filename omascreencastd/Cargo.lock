@@ -267,6 +267,9 @@ version = "0.2.0"
 dependencies = [
  "gs-proto",
  "openssl",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
