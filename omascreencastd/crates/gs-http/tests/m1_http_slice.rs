@@ -103,16 +103,27 @@ fn parse_response(bytes: &[u8]) -> (u16, String) {
     (status, body)
 }
 
+/// Read the `status_code` attribute out of an XML envelope body.
+fn protocol_status(body: &str) -> String {
+    let document = gs_proto::xml::Element::parse(body).expect("body is XML");
+    document
+        .attributes
+        .iter()
+        .find(|(key, _)| key == "status_code")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default()
+}
+
 #[test]
 fn serverinfo_is_reachable_without_a_client_certificate() {
     let harness = Harness::start();
     let (status, body) = harness.request("GET", "/serverinfo", None);
     assert_eq!(status, 200);
-    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(json["hostname"], "test-host");
-    assert_eq!(json["PairStatus"], 1);
-    assert_eq!(json["HttpsPort"], 47984);
-    assert!(json["uniqueid"].as_str().unwrap().contains('-'));
+    let document = gs_proto::xml::Element::parse(&body).unwrap();
+    assert_eq!(document.child_text("hostname"), Some("test-host"));
+    assert_eq!(document.child_text("PairStatus"), Some("1"));
+    assert_eq!(document.child_text("HttpsPort"), Some("47984"));
+    assert!(document.child_text("uniqueid").unwrap().contains('-'));
 }
 
 #[test]
@@ -133,8 +144,11 @@ fn applist_is_reachable_after_a_client_certificate_is_presented() {
     let client = Identity::generate("client").unwrap();
     let (status, body) = harness.request("GET", "/applist", Some(&client));
     assert_eq!(status, 200);
-    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(json["App"].as_array().unwrap().len(), 1);
+    let document = gs_proto::xml::Element::parse(&body).unwrap();
+    assert_eq!(
+        document.find("App").and_then(|app| app.child_text("ID")),
+        Some("1")
+    );
 }
 
 #[test]
@@ -175,9 +189,15 @@ fn pairing_request_is_recorded_and_reachable_over_tls() {
 }
 
 #[test]
-fn unknown_routes_are_404_and_launch_is_not_yet_available() {
+fn unknown_routes_and_unpaired_launch_are_protocol_status_codes() {
+    // A captured GameStream host answers HTTP 200 and carries the real result
+    // in the XML `status_code`, so both of these are 200 with a body status.
     let harness = Harness::start();
-    assert_eq!(harness.request("GET", "/nope", None).0, 404);
-    // `/launch` is a known route but unpaired clients may not use it.
-    assert_eq!(harness.request("GET", "/launch", None).0, 401);
+    let (status, body) = harness.request("GET", "/nope", None);
+    assert_eq!(status, 200);
+    assert_eq!(protocol_status(&body), "404");
+
+    let (status, body) = harness.request("GET", "/launch", None);
+    assert_eq!(status, 200);
+    assert_eq!(protocol_status(&body), "401");
 }

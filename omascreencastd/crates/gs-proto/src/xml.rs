@@ -1,10 +1,13 @@
 //! Minimal XML support for the endpoints that speak XML.
 //!
-//! GameStream is JSON on `/serverinfo` and `/applist`, but the pairing
-//! endpoints exchange XML documents whose *element names* are part of the
-//! protocol. Rather than hand-rolling string concatenation (which is where
-//! escaping bugs live), this module builds and parses a tiny document model on
-//! top of `quick-xml`:
+//! A capture against a real Sunshine host (see
+//! `omascreencastd/tests/fixtures/m0/README.md`) showed that `/serverinfo`,
+//! `/applist`, and the pairing endpoints all exchange XML documents whose
+//! *element names* are part of the protocol. An earlier revision assumed JSON
+//! for the first two, based on the M0 fake responder; the capture corrected
+//! that. Rather than hand-rolling string concatenation (which is where escaping
+//! bugs live), this module builds and parses a tiny document model on top of
+//! `quick-xml`:
 //!
 //! - parsing is tolerant of whitespace and attribute order,
 //! - serialising escapes text and attribute values correctly,
@@ -89,6 +92,22 @@ impl Element {
         String::from_utf8(bytes).map_err(|_| XmlError::NotUtf8)
     }
 
+    /// Serialise with the UTF-8 XML declaration the GameStream host emits.
+    ///
+    /// The captured Sunshine responses all begin with
+    /// `<?xml version="1.0" encoding="utf-8"?>`, so a byte-faithful response
+    /// needs the declaration in front of the document.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::to_xml`].
+    pub fn to_document(&self) -> Result<String, XmlError> {
+        Ok(format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n{}",
+            self.to_xml()?
+        ))
+    }
+
     /// Parse an XML document and return its root element.
     ///
     /// # Errors
@@ -170,16 +189,22 @@ fn write_element(writer: &mut Writer<Vec<u8>>, element: &Element) -> Result<(), 
         start.push_attribute((key.as_str(), value.as_str()));
     }
     if element.children.is_empty() {
+        if element.text.is_empty() {
+            // A captured GameStream host writes `<root status_code="404"/>`,
+            // not an open/close pair, so an empty element is self-closing.
+            writer
+                .write_event(Event::Empty(start))
+                .map_err(|_| XmlError::Write)?;
+            return Ok(());
+        }
         writer
             .write_event(Event::Start(start))
             .map_err(|_| XmlError::Write)?;
-        if !element.text.is_empty() {
-            writer
-                .write_event(Event::Text(quick_xml::events::BytesText::new(
-                    &element.text,
-                )))
-                .map_err(|_| XmlError::Write)?;
-        }
+        writer
+            .write_event(Event::Text(quick_xml::events::BytesText::new(
+                &element.text,
+            )))
+            .map_err(|_| XmlError::Write)?;
         writer
             .write_event(Event::End(quick_xml::events::BytesEnd::new(
                 element.name.as_str(),

@@ -29,11 +29,24 @@ plan.
 - Moonlight for Android TV installed and able to reach the host.
 - Host tooling: `git`, `cargo`/build deps for Sunshine, `ffmpeg`,
   `python3` with `zeroconf`, `openssl`, and `tcpdump` (or Wireshark).
-- Ports used below: HTTPS `47984`, RTSP `48010`. Confirm they are free:
+- Ports used below: plaintext discovery `47989`, HTTPS `47984`, RTSP `48010`.
+  Confirm they are free:
 
   ```sh
-  ss -lntup | grep -E '47984|48010' && echo 'in use' || echo 'free'
+  ss -lntup | grep -E '47989|47984|48010' && echo 'in use' || echo 'free'
   ```
+
+  A capture on this machine settled what each port does:
+
+  | Port | Scheme | Answers | Trust |
+  |---|---|---|---|
+  | 47989 | HTTP | `/serverinfo` only; every other path is `<root status_code="404"/>` | none |
+  | 47984 | HTTPS | pairing, app list, launch | **requires a trusted client certificate on every route** |
+  | 48010 | RTSP | `DESCRIBE`/`SETUP`/`PLAY` | per pairing |
+
+  Discovery is XML on 47989 (`curl -s http://<host>:47989/serverinfo`), and a
+  protocol failure is HTTP 200 with `status_code` in the body — not the HTTP
+  status.
 
 ---
 
@@ -88,9 +101,12 @@ It prints the bound URL and advertises `_nvstream._tcp`. From another shell,
 sanity-check the routes over TLS (the spike cert is self-signed):
 
 ```sh
-curl -sk https://<host-ip>:47984/serverinfo | python3 -m json.tool
-curl -sk https://<host-ip>:47984/applist    | python3 -m json.tool
-curl -sk https://<host-ip>:47984/sdp
+# Discovery is plaintext and XML; no certificate is needed.
+curl -s http://<host-ip>:47989/serverinfo
+# Everything else needs a *trusted* certificate on 47984. Without one the
+# handshake is refused outright; with an untrusted one every route answers a
+# 401 envelope. Both are expected until pairing completes.
+curl -sk https://<host-ip>:47984/serverinfo
 ```
 
 Every request lands in `spike-capture.jsonl` verbatim (method line, headers,

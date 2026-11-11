@@ -132,7 +132,10 @@ pub struct FixtureRequest {
 /// random challenge) unasserted.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExpectedResponse {
-    /// Required status code.
+    /// Required HTTP status code.
+    ///
+    /// A captured GameStream host answers `200` even for a protocol failure; the
+    /// real result lives in [`Self::xml`]'s `status_code` attribute.
     pub status: u16,
     /// Required `Content-Type`, when the protocol fixes it.
     #[serde(default)]
@@ -140,9 +143,34 @@ pub struct ExpectedResponse {
     /// A JSON value the response body must contain (subset match).
     #[serde(default)]
     pub json: Option<serde_json::Value>,
+    /// XML assertions for the body, the format the captured host speaks.
+    #[serde(default)]
+    pub xml: Option<XmlExpectation>,
     /// An exact body match, when the protocol fixes the bytes.
     #[serde(default)]
     pub body: Option<String>,
+}
+
+/// Assertions against an XML response body.
+///
+/// The body is parsed with the same [`gs_proto::xml::Element`] model the daemon
+/// uses, then matched structurally. That keeps a fixture readable: it records
+/// the values that matter (`status_code`, a hostname, a child element) without
+/// pinning incidental whitespace or field order.
+#[derive(Debug, Clone, Deserialize)]
+pub struct XmlExpectation {
+    /// Required `status_code` attribute on the root element.
+    #[serde(default)]
+    pub status_code: Option<u16>,
+    /// Required `status_message` attribute, when the protocol fixes it.
+    #[serde(default)]
+    pub status_message: Option<String>,
+    /// Child elements whose text must match, as `name: text` pairs.
+    #[serde(default)]
+    pub children: Vec<(String, String)>,
+    /// Child elements that must be present, without asserting their text.
+    #[serde(default)]
+    pub present: Vec<String>,
 }
 
 /// One fixture file: an optional host description and its ordered fixtures.
@@ -332,6 +360,20 @@ pub fn replay(state: &DaemonState, fixture: &HttpFixture) -> Result<(), ReplayEr
             });
         }
     }
+    if let Some(expected) = &fixture.expect.xml {
+        let text = String::from_utf8_lossy(&response.body);
+        let document =
+            gs_proto::xml::Element::parse(&text).map_err(|error| ReplayError::Mismatch {
+                name: fixture.name.clone(),
+                detail: format!("response body is not XML: {error}"),
+            })?;
+        if let Some(detail) = xml_mismatch(expected, &document) {
+            return Err(ReplayError::Mismatch {
+                name: fixture.name.clone(),
+                detail,
+            });
+        }
+    }
     if let Some(expected) = &fixture.expect.json {
         let actual: serde_json::Value =
             serde_json::from_slice(&response.body).map_err(|error| ReplayError::Mismatch {
@@ -358,6 +400,47 @@ pub fn replay_all(state: &DaemonState, fixtures: &[HttpFixture]) -> Result<(), R
         replay(state, fixture)?;
     }
     Ok(())
+}
+
+/// Describe the first place an XML assertion does not hold, if any.
+fn xml_mismatch(expected: &XmlExpectation, document: &gs_proto::xml::Element) -> Option<String> {
+    if let Some(status) = expected.status_code {
+        let actual = document
+            .attributes
+            .iter()
+            .find(|(key, _)| key == "status_code")
+            .map(|(_, value)| value.as_str());
+        if actual != Some(status.to_string().as_str()) {
+            return Some(format!("status_code {actual:?} != expected {status}"));
+        }
+    }
+    if let Some(message) = &expected.status_message {
+        let actual = document
+            .attributes
+            .iter()
+            .find(|(key, _)| key == "status_message")
+            .map(|(_, value)| value.as_str());
+        if actual != Some(message.as_str()) {
+            return Some(format!("status_message {actual:?} != expected {message:?}"));
+        }
+    }
+    for name in &expected.present {
+        if document.find(name).is_none() {
+            return Some(format!("missing element {name:?}"));
+        }
+    }
+    for (name, value) in &expected.children {
+        match document.child_text(name) {
+            Some(actual) if actual == value => {}
+            Some(actual) => {
+                return Some(format!(
+                    "element {name:?} is {actual:?} != expected {value:?}"
+                ));
+            }
+            None => return Some(format!("missing element {name:?}")),
+        }
+    }
+    None
 }
 
 /// Describe the first place `expected` is not a subset of `actual`.
@@ -454,6 +537,28 @@ mod tests {
         }
     }
 
+    fn xml_expectation(
+        status: u16,
+        status_code: u16,
+        children: &[(&str, &str)],
+    ) -> ExpectedResponse {
+        ExpectedResponse {
+            status,
+            content_type: Some(String::from("application/xml")),
+            json: None,
+            xml: Some(XmlExpectation {
+                status_code: Some(status_code),
+                status_message: None,
+                children: children
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                    .collect(),
+                present: Vec::new(),
+            }),
+            body: None,
+        }
+    }
+
     #[test]
     fn an_empty_directory_loads_no_fixtures() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,32 +603,31 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_fixture_replays_and_a_mismatch_is_reported() {
+    fn a_matching_xml_fixture_replays_and_a_mismatch_is_reported() {
         let (_dir, state) = state();
         let ok = fixture(
             "serverinfo",
             "/serverinfo",
-            ExpectedResponse {
-                status: 200,
-                content_type: Some(String::from("application/json")),
-                json: Some(serde_json::json!({"hostname": "golden-host", "PairStatus": 1})),
-                body: None,
-            },
+            xml_expectation(
+                200,
+                200,
+                &[("hostname", "golden-host"), ("PairStatus", "1")],
+            ),
         );
         replay(&state, &ok).unwrap();
 
-        let wrong_status = fixture(
+        // The HTTP status no longer decides success: a protocol failure is a
+        // 200 with a non-200 `status_code` in the body.
+        let not_found = fixture("not-found", "/nope", xml_expectation(200, 404, &[]));
+        replay(&state, &not_found).unwrap();
+
+        let wrong_child = fixture(
             "wrong",
             "/serverinfo",
-            ExpectedResponse {
-                status: 404,
-                content_type: None,
-                json: None,
-                body: None,
-            },
+            xml_expectation(200, 200, &[("hostname", "someone-else")]),
         );
         assert!(matches!(
-            replay(&state, &wrong_status),
+            replay(&state, &wrong_child),
             Err(ReplayError::Mismatch { .. })
         ));
     }

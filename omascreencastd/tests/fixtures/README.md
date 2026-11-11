@@ -67,14 +67,21 @@ Each subsequent line is one **exchange**:
 
 Rules for the `expect` block:
 
-- `status` is required; `content_type`, `json`, and `body` are optional.
-- `json` is a **subset** match: every key present must match, extra keys in the
-  response are ignored. Use it for responses with volatile fields (a `uniqueid`
-  derived from the certificate, a random challenge) and assert only the parts
-  the protocol fixes.
+- `status` is **required**, but note that a captured GameStream host answers
+  `200` even for a protocol failure: the real result is `xml.status_code`.
+- `xml` asserts the body, the format the host actually speaks. It takes
+  `status_code`, `status_message`, `children` (as `[name, text]` pairs), and
+  `present` (names only). The body is parsed with the same
+  [`gs_proto::xml::Element`](../../crates/gs-proto/src/xml.rs) model the daemon
+  uses, so field order and whitespace do not matter.
+- `content_type` is optional; captured responses are `application/xml`.
+- `json` is a **subset** match, retained for endpoints that turn out to be JSON.
 - `body` is an exact byte match, for responses the protocol fixes completely.
 - `certificate_der_hex` is the client certificate in DER form, hex-encoded, for
   fixtures that exercise a paired route.
+
+A real capture lives in [`http/oracle-unpaired.jsonl`](http/oracle-unpaired.jsonl);
+its provenance and the findings it forced are in [`m0/README.md`](m0/README.md).
 
 The harness skips cleanly while the directory holds no `*.jsonl` files, so CI is
 green before the capture lands and starts asserting the moment it does.

@@ -18,8 +18,8 @@ use gs_crypto::{Identity, TrustStore, identity_paths, paths_under};
 use gs_proto::ipc::{CommandReply, IpcCommand};
 use osc_daemon::control::{control_path, send_command};
 use osc_daemon::{
-    ControlServer, DaemonState, HttpServer, HubEventSink, IpcHub, IpcServer, RtspServer,
-    SessionManager, command_handler,
+    ControlServer, DaemonState, DiscoveryServer, HttpServer, HubEventSink, IpcHub, IpcServer,
+    RtspServer, SessionManager, command_handler,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -60,6 +60,11 @@ enum Command {
         /// HTTPS port; `0` asks the OS for an ephemeral port.
         #[arg(long, default_value_t = gs_proto::DEFAULT_HTTPS_PORT)]
         https_port: u16,
+        /// Plaintext discovery port that answers only `/serverinfo`; `0` asks
+        /// the OS for an ephemeral port. Matches the captured host's split,
+        /// where 47989 is unauthenticated discovery and 47984 is trusted TLS.
+        #[arg(long, default_value_t = gs_proto::DEFAULT_HTTP_PORT)]
+        http_port: u16,
         /// RTSP port advertised to clients (bound in M2).
         #[arg(long, default_value_t = gs_proto::DEFAULT_RTSP_PORT)]
         rtsp_port: u16,
@@ -100,9 +105,10 @@ fn main() {
         Command::Serve {
             bind,
             https_port,
+            http_port,
             rtsp_port,
             mac,
-        } => serve(&cli, *bind, *https_port, *rtsp_port, mac),
+        } => serve(&cli, *bind, *https_port, *http_port, *rtsp_port, mac),
         Command::Pair { pin, id } => pair(pin.as_deref(), id.as_deref()),
         // Not yet implemented; keep the failure explicit rather than silently
         // exiting 0, so a half-built daemon is never mistaken for a working one.
@@ -128,10 +134,12 @@ fn identity(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve(
     cli: &Cli,
     bind: Ipv4Addr,
     https_port: u16,
+    http_port: u16,
     rtsp_port: u16,
     mac: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -168,6 +176,9 @@ fn serve(
     let mut ipc = IpcServer::bind(osc_daemon::socket_path()?, event_hub)?;
     let mut control = ControlServer::bind(control_path()?, command_handler(state.clone()))?;
     let mut https = HttpServer::bind(bind, https_port, state.clone())?;
+    // Discovery is a separate plaintext socket that answers only `/serverinfo`,
+    // mirroring the captured host. It never exposes a pairing or launch route.
+    let mut discovery = DiscoveryServer::bind(bind, http_port, state.clone())?;
     let mut rtsp = RtspServer::bind(bind, rtsp_port, sessions, hub.clone())?;
 
     // Advertise last, so the host is not discoverable before it can answer.
@@ -199,6 +210,10 @@ fn serve(
         gs_proto::ipc::phase::STARTING,
     ));
     println!("https:   https://{}", https.local_addr());
+    println!(
+        "http:    http://{} (discovery only)",
+        discovery.local_addr()
+    );
     println!("rtsp:    rtsp://{}", rtsp.local_addr());
     println!("event:   {}", ipc.path().display());
     println!("control: {}", control.path().display());
@@ -228,6 +243,7 @@ fn serve(
         eprintln!("omascreencastd: session teardown: {error}");
     }
     rtsp.shutdown();
+    discovery.shutdown();
     https.shutdown();
     control.shutdown();
     ipc.shutdown();

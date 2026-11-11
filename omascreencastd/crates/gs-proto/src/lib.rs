@@ -22,6 +22,7 @@ pub mod dto;
 pub mod endian;
 pub mod ipc;
 pub mod packed;
+pub mod wire;
 pub mod xml;
 
 pub use constants::*;

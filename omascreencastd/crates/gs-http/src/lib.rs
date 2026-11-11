@@ -1,5 +1,20 @@
-//! GameStream HTTPS server: TLS listener with client-certificate verification,
+//! GameStream server: a trusted HTTPS listener, a plaintext discovery listener,
 //! a route table, and the exact error responses the client expects.
+//!
+//! # Two listeners, as captured
+//!
+//! A real Sunshine host answers discovery on **plaintext** port 47989 and
+//! requires a trusted client certificate on **every** route of HTTPS port 47984.
+//! This crate mirrors that: [`DiscoveryServer`] answers only `/serverinfo` and
+//! returns a `404` envelope for everything else, while [`HttpServer`] carries
+//! the pairing and session routes behind the trust store.
+//!
+//! # Wire format, as captured
+//!
+//! Control responses are **XML**, wrapped in `<root status_code="…">`. A
+//! protocol failure is HTTP `200`; the client reads `status_code`, not the HTTP
+//! status. This corrected the earlier JSON assumption taken from the M0 fake
+//! responder; see `omascreencastd/tests/fixtures/m0/README.md`.
 //!
 //! # Milestone scope
 //!
@@ -34,6 +49,7 @@
 
 #![deny(missing_docs)]
 
+mod discovery;
 mod handlers;
 mod query;
 mod request;
@@ -45,6 +61,7 @@ mod xml;
 pub mod replay;
 pub mod session;
 
+pub use discovery::{DiscoveryError, DiscoveryServer};
 pub use handlers::parse_pin;
 pub use route::Route;
 pub use server::{HttpServer, HttpServerError, local_ipv4};

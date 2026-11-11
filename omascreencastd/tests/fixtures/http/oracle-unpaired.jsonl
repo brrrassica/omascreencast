@@ -1,0 +1,23 @@
+# Captured from a local Sunshine oracle (M0-T1) over plaintext HTTP on 47989.
+#
+# Provenance is in ../../m0/README.md. These are the unauthenticated discovery
+# exchanges: port 47989 answers /serverinfo without a client certificate and
+# `<root status_code="404"/>` for every other path. Nothing here was hand-written
+# to fit the daemon; the assertions are the values the capture showed.
+#
+# The `server` directive fixes the non-volatile fields the host echoed. `uniqueid`
+# is derived from the identity at replay time, so it is asserted only for shape
+# (present), never for equality.
+{"server": {"hostname": "E14G4-Omarchy Monitor 1", "mac": "00:00:00:00:00:00", "local_ip": "127.0.0.1", "https_port": 47984, "rtsp_port": 48010}}
+
+# FINDING: the captured host sets ExternalPort to the port that served the
+# request (47989 here), not to HttpsPort (47984). ExternalPort is therefore not
+# asserted: this daemon reports the HTTPS port, and the two only diverge on the
+# plaintext discovery socket. Recorded rather than papered over.
+{"name": "serverinfo-unpaired-plaintext", "request": {"method": "GET", "path": "/serverinfo", "query": "uniqueid=0123456789ABCDEF", "headers": [["Host", "127.0.0.1:47989"]]}, "expect": {"status": 200, "content_type": "application/xml", "xml": {"status_code": 200, "children": [["hostname", "E14G4-Omarchy Monitor 1"], ["HttpsPort", "47984"], ["PairStatus", "1"]], "present": ["uniqueid", "appversion", "GfeVersion", "mac", "LocalIP", "ServerCodecModeSupport", "currentgame", "state", "ExternalPort"]}}}
+
+{"name": "serverinfo-without-uniqueid-still-succeeds", "request": {"method": "GET", "path": "/serverinfo", "headers": [["Host", "127.0.0.1:47989"]]}, "expect": {"status": 200, "content_type": "application/xml", "xml": {"status_code": 200, "children": [["hostname", "E14G4-Omarchy Monitor 1"]]}}}
+
+{"name": "unknown-path-is-a-404-envelope", "request": {"method": "GET", "path": "/nope"}, "expect": {"status": 200, "content_type": "application/xml", "xml": {"status_code": 404}}}
+
+{"name": "root-path-is-a-404-envelope", "request": {"method": "GET", "path": "/"}, "expect": {"status": 200, "content_type": "application/xml", "xml": {"status_code": 404}}}

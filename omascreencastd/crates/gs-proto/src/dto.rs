@@ -52,7 +52,10 @@ pub struct ServerInfo {
     #[serde(rename = "PairStatus")]
     pub pair_status: u8,
     /// Currently running app id, `0` when idle.
-    pub currentgame: u16,
+    ///
+    /// Serialised as a 32-bit integer on the wire: the captured oracle emits
+    /// values that do not fit a `u16`.
+    pub currentgame: u32,
     /// Host state string; see [`STATE_FREE`].
     pub state: String,
     /// RTSP URL for the first session slot.

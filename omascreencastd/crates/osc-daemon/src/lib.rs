@@ -15,7 +15,7 @@ pub mod rtsp;
 pub mod session;
 
 pub use control::{ControlError, ControlServer, control_path, control_path_for, send_command};
-pub use gs_http::{DaemonState, HttpServer, ServerConfig};
+pub use gs_http::{DaemonState, DiscoveryServer, HttpServer, ServerConfig};
 pub use ipc::{IpcError, IpcHub, IpcServer, socket_path, socket_path_for};
 pub use output::{HyprlandOutput, OutputError, OutputManager};
 pub use rtsp::{RtspServer, RtspServerError};

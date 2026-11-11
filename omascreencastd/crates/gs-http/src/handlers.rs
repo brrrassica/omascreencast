@@ -36,16 +36,6 @@ pub struct Response {
 }
 
 impl Response {
-    /// A `200` JSON response.
-    #[must_use]
-    pub fn json(body: impl Into<Vec<u8>>) -> Self {
-        Self {
-            status: 200,
-            content_type: "application/json",
-            body: body.into(),
-        }
-    }
-
     /// A `200` XML response.
     #[must_use]
     pub fn xml(body: impl Into<Vec<u8>>) -> Self {
@@ -56,27 +46,36 @@ impl Response {
         }
     }
 
-    /// Render an [`HttpError`] in the shape the route's client expects.
+    /// Render an [`HttpError`] the way a captured GameStream host does.
+    ///
+    /// Two facts from the oracle capture shape this:
+    ///
+    /// 1. The HTTP status is **`200`** even for a protocol failure. The client
+    ///    reads `status_code` out of the XML body, not the HTTP line.
+    /// 2. The body is a `<root status_code="…" status_message="…"/>` envelope.
+    ///
+    /// The informational message for an internal error is withheld: a captured
+    /// host does not leak one either, and it keeps the reason in the log rather
+    /// than on the wire.
     #[must_use]
-    pub fn error(route: Route, error: &HttpError) -> Self {
-        let json = matches!(
-            route,
-            Route::ServerInfo | Route::AppList | Route::Launch | Route::Resume | Route::Cancel
-        );
-        let body = if json {
-            serde_json::json!({"error": error.to_string()}).to_string()
-        } else {
-            Element::with_text("error", error.to_string())
-                .to_xml()
-                .unwrap_or_else(|_| String::from("<error>internal</error>"))
+    pub fn error(_route: Route, error: &HttpError) -> Self {
+        let status = error.status();
+        // A captured host emits a bare `<root status_code="404"/>` with no
+        // message for an unknown path, so the message is omitted there to stay
+        // byte-faithful. Other failures carry the client-facing reason.
+        let envelope = match wire_message(error) {
+            Some(message) => gs_proto::wire::envelope_message(status, message),
+            None => gs_proto::wire::envelope(status),
+        };
+        let body = match envelope.to_document() {
+            Ok(body) => body,
+            Err(_) => format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<root status_code=\"{status}\"/>"
+            ),
         };
         Self {
-            status: error.status(),
-            content_type: if json {
-                "application/json"
-            } else {
-                "application/xml"
-            },
+            status: 200,
+            content_type: "application/xml",
             body: body.into_bytes(),
         }
     }
@@ -135,14 +134,13 @@ const fn route_placeholder() -> Route {
 
 fn server_info(state: &DaemonState) -> Result<Response, HttpError> {
     let info = state.server_info();
-    let body = serde_json::to_vec(&info).map_err(|error| HttpError::Internal(error.to_string()))?;
-    Ok(Response::json(body))
+    Ok(xml_response(gs_proto::wire::server_info(&info)))
 }
 
 fn app_list(_state: &DaemonState) -> Result<Response, HttpError> {
-    let body = serde_json::to_vec(&AppList::desktop_only())
-        .map_err(|error| HttpError::Internal(error.to_string()))?;
-    Ok(Response::json(body))
+    Ok(xml_response(gs_proto::wire::app_list(
+        &AppList::desktop_only(),
+    )))
 }
 
 fn server_certificate(state: &DaemonState) -> Result<Response, HttpError> {
@@ -265,9 +263,11 @@ fn launch(state: &DaemonState, request: &Request) -> Result<Response, HttpError>
         .events()
         .session_request(params.mode.as_deref().unwrap_or("default"), app_id);
     state.sessions().launch(&params)?;
-    Ok(json_response(LaunchResponse::new(
-        &state.config().local_ip.to_string(),
-        state.config().rtsp_port,
+    Ok(xml_response(gs_proto::wire::launch_response(
+        &LaunchResponse::new(
+            &state.config().local_ip.to_string(),
+            state.config().rtsp_port,
+        ),
     )))
 }
 
@@ -275,9 +275,11 @@ fn launch(state: &DaemonState, request: &Request) -> Result<Response, HttpError>
 fn resume(state: &DaemonState, request: &Request) -> Result<Response, HttpError> {
     let params = LaunchParams::from_pairs(request.query_pairs());
     state.sessions().resume(&params)?;
-    Ok(json_response(LaunchResponse::new(
-        &state.config().local_ip.to_string(),
-        state.config().rtsp_port,
+    Ok(xml_response(gs_proto::wire::launch_response(
+        &LaunchResponse::new(
+            &state.config().local_ip.to_string(),
+            state.config().rtsp_port,
+        ),
     )))
 }
 
@@ -309,22 +311,34 @@ fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
 }
 
 fn xml_response(document: Element) -> Response {
-    match document.to_xml() {
+    match document.to_document() {
         Ok(body) => Response::xml(body),
-        Err(error) => Response::error(
-            Route::Pair,
-            &HttpError::Internal(format!("could not serialise response: {error}")),
-        ),
+        Err(error) => {
+            tracing::error!(%error, "could not serialise response");
+            Response::error(Route::Pair, &HttpError::Internal(error.to_string()))
+        }
     }
 }
 
-fn json_response<T: serde::Serialize>(value: T) -> Response {
-    match serde_json::to_vec(&value) {
-        Ok(body) => Response::json(body),
-        Err(error) => Response::error(
-            Route::Launch,
-            &HttpError::Internal(format!("could not serialise response: {error}")),
-        ),
+/// The client-facing message for an error, in the vocabulary a captured host
+/// uses. Internal reasons are logged, never echoed.
+///
+/// `None` means the captured host sends no `status_message` at all, which is
+/// what it does for an unknown path.
+fn wire_message(error: &HttpError) -> Option<&str> {
+    match error {
+        HttpError::Unauthorized => {
+            Some("The client is not authorized. Certificate verification failed.")
+        }
+        HttpError::BadRequest(_) => Some("Invalid request."),
+        HttpError::Busy(_) => Some("The host is already streaming."),
+        HttpError::Unavailable(_) => Some("The host could not start a session."),
+        HttpError::NotImplemented(_) => Some("Not implemented."),
+        HttpError::NotFound => None,
+        HttpError::Internal(message) => {
+            tracing::error!(%message, "internal error");
+            Some("Internal error.")
+        }
     }
 }
 
@@ -441,14 +455,17 @@ mod tests {
     }
 
     #[test]
-    fn serverinfo_is_json_with_the_wire_fields() {
+    fn serverinfo_is_xml_with_the_wire_fields() {
         let (_dir, state) = state();
         let response = handle(&state, &request("GET", "/serverinfo", ""), peer("10.0.0.2"));
         assert_eq!(response.status, 200);
-        let json: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
-        assert_eq!(json["hostname"], "host");
-        assert_eq!(json["PairStatus"], 1);
-        assert_eq!(json["HttpsPort"], 47984);
+        assert_eq!(response.content_type, "application/xml");
+        let text = String::from_utf8(response.body).unwrap();
+        assert!(text.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>"));
+        let doc = Element::parse(&text).unwrap();
+        assert_eq!(doc.child_text("hostname"), Some("host"));
+        assert_eq!(doc.child_text("PairStatus"), Some("1"));
+        assert_eq!(doc.child_text("HttpsPort"), Some("47984"));
     }
 
     #[test]
@@ -456,8 +473,10 @@ mod tests {
         let (_dir, state) = state();
         let response = handle(&state, &request("GET", "/applist", ""), peer("10.0.0.2"));
         assert_eq!(response.status, 200);
-        let json: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
-        assert_eq!(json["App"][0]["ID"], "1");
+        let text = String::from_utf8(response.body).unwrap();
+        let doc = Element::parse(&text).unwrap();
+        let app = doc.find("App").expect("one desktop app");
+        assert_eq!(app.child_text("ID"), Some("1"));
     }
 
     #[test]
@@ -511,10 +530,37 @@ mod tests {
     }
 
     #[test]
-    fn launch_requires_pairing() {
+    fn launch_without_pairing_returns_a_200_xml_401_envelope() {
+        // A captured host answers HTTP 200 and carries the protocol status in
+        // the XML body; the client reads `status_code`, not the HTTP line.
         let (_dir, state) = state();
         let response = handle(&state, &request("GET", "/launch", ""), peer("10.0.0.2"));
-        assert_eq!(response.status, 401);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "application/xml");
+        let text = String::from_utf8(response.body).unwrap();
+        let doc = Element::parse(&text).unwrap();
+        assert_eq!(
+            doc.attributes,
+            vec![
+                (String::from("status_code"), String::from("401")),
+                (
+                    String::from("status_message"),
+                    String::from("The client is not authorized. Certificate verification failed."),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn not_found_is_a_self_closing_envelope_without_a_message() {
+        // Byte-faithful to the capture: `<root status_code="404"/>`, no message.
+        let (_dir, state) = state();
+        let response = handle(&state, &request("GET", "/nope", ""), peer("10.0.0.2"));
+        let text = String::from_utf8(response.body).unwrap();
+        assert_eq!(
+            text,
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<root status_code=\"404\"/>"
+        );
     }
 
     #[test]
@@ -531,30 +577,46 @@ mod tests {
         request.query = String::from("appid=1&mode=1280x720x60");
         let response = handle(&state, &request, trusted_peer());
         assert_eq!(response.status, 200);
-        let json: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
-        assert_eq!(json["Gamesession"], "1");
-        assert_eq!(json["SessionUrl0"], "rtsp://192.168.1.2:48010");
+        let text = String::from_utf8(response.body).unwrap();
+        let doc = Element::parse(&text).unwrap();
+        assert_eq!(doc.child_text("Gamesession"), Some("1"));
+        assert_eq!(
+            doc.child_text("SessionUrl0"),
+            Some("rtsp://192.168.1.2:48010")
+        );
+    }
+
+    fn protocol_status(response: &Response) -> String {
+        let text = String::from_utf8(response.body.clone()).unwrap();
+        let doc = Element::parse(&text).unwrap();
+        doc.attributes
+            .iter()
+            .find(|(key, _)| key == "status_code")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
     }
 
     #[test]
-    fn a_busy_session_is_a_409() {
+    fn a_busy_session_is_a_409_in_the_protocol_status() {
         let (_dir, state) =
             trusted_state(Err(SessionError::Busy(String::from("already streaming"))));
         let mut request = request("GET", "/launch", "");
         request.query = String::from("mode=1920x1080x60");
         let response = handle(&state, &request, trusted_peer());
-        assert_eq!(response.status, 409);
+        assert_eq!(response.status, 200);
+        assert_eq!(protocol_status(&response), "409");
     }
 
     #[test]
-    fn an_unavailable_session_is_a_503() {
+    fn an_unavailable_session_is_a_503_in_the_protocol_status() {
         let (_dir, state) = trusted_state(Err(SessionError::Unavailable(String::from(
             "no compositor",
         ))));
         let mut request = request("GET", "/launch", "");
         request.query = String::from("mode=1920x1080x60");
         let response = handle(&state, &request, trusted_peer());
-        assert_eq!(response.status, 503);
+        assert_eq!(response.status, 200);
+        assert_eq!(protocol_status(&response), "503");
     }
 
     /// A [`crate::SessionController`] with a fixed result.
@@ -581,9 +643,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_routes_are_404() {
+    fn unknown_routes_are_a_404_envelope() {
         let (_dir, state) = state();
         let response = handle(&state, &request("GET", "/nope", ""), peer("10.0.0.2"));
-        assert_eq!(response.status, 404);
+        assert_eq!(response.status, 200);
+        assert_eq!(protocol_status(&response), "404");
     }
 }

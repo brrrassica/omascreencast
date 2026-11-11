@@ -11,6 +11,14 @@
 /// The default HTTPS control port Moonlight probes on a discovered host.
 pub const DEFAULT_HTTPS_PORT: u16 = 47984;
 
+/// The plaintext HTTP port used only for unauthenticated discovery.
+///
+/// Verified against the Sunshine oracle: port `47989` answers `GET /serverinfo`
+/// without a client certificate and returns `<root status_code="404"/>` for
+/// every other path. Moonlight reads discovery from here, then switches to
+/// [`DEFAULT_HTTPS_PORT`] for pairing and sessions.
+pub const DEFAULT_HTTP_PORT: u16 = 47989;
+
 /// The default RTSP port, advertised in `/serverinfo` and `/launch` as
 /// `SessionUrl0` and used for both plaintext and encrypted RTSP.
 pub const DEFAULT_RTSP_PORT: u16 = 48010;
