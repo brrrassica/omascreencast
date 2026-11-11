@@ -322,6 +322,20 @@ class ReconcileTest(_TempPaths):
         self.assertIn("cast stopped", result["reasons"])
         self.assertEqual(removed, ["HEADLESS-1"])
 
+    def test_pid_less_starting_session_is_cleaned(self):
+        self._active(pid=None, phase="starting")
+        removed = []
+        result = self.session.reconcile(
+            monitors=[{"name": "eDP-1"}, {"name": "HEADLESS-1"}],
+            alive=lambda _pid: True,
+            remove=removed.append,
+        )
+        self.assertTrue(result["cleaned"])
+        self.assertIn("stream not started", result["reasons"])
+        self.assertIsNone(result["active"])
+        self.assertIsNone(self.session.load()["active"])
+        self.assertEqual(removed, ["HEADLESS-1"])
+
     def test_orphans_are_reported_not_removed(self):
         result = self.session.reconcile(
             monitors=[{"name": "eDP-1"}, {"name": "HEADLESS-4"}],
@@ -481,6 +495,31 @@ class CreateLifecycleTest(_TempPaths):
         self.assertEqual(removed, ["HEADLESS-1"])
         self.assertIsNone(self.session.load()["active"])
 
+    def test_create_rolls_back_when_spawn_raises(self):
+        self.session.CREATE_HEALTH_DELAY = 0
+        removed = []
+
+        self.session.list_monitors = lambda: [
+            {"name": "eDP-1", "focused": True, "x": 0, "y": 0,
+             "width": 1920, "height": 1080, "scale": 1},
+            {"name": "HEADLESS-1"},
+        ]
+        self.session.create_headless_output = lambda name: ("HEADLESS-1", [])
+        self.session.apply_arrangement = lambda *a, **k: None
+        self.session.remove_output = removed.append
+
+        def fail_spawn(command):
+            raise OSError("could not open stream log")
+
+        self.session.spawn_stream = fail_spawn
+
+        payload = self.emit_command(self.session.cmd_create, self._args())
+        self.assertFalse(payload["ok"])
+        self.assertIn("could not start the cast engine", payload["error"])
+        self.assertEqual(removed, ["HEADLESS-1"])
+        self.assertIsNone(self.session.load()["active"])
+        self.assertEqual(self.session.load()["ownedOutputs"], [])
+
     def test_duplicate_running_session_is_rejected(self):
         self.session.save({"version": 1, "active": {
             "name": "HEADLESS-1", "pid": 9, "phase": "casting",
@@ -529,6 +568,19 @@ class EventsTest(_TempPaths):
             self.session.cmd_events(argparse.Namespace(interval=0.01))
         messages = [json.loads(line) for line in out.getvalue().splitlines() if line]
         self.assertEqual(messages[-1]["phase"], "stopped")
+
+    def test_events_exits_when_stream_never_started(self):
+        self.session.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.session.STREAM_LOG.write_text("", encoding="utf-8")
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "pid": None, "phase": "starting", "logOffset": 0,
+        }})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.session.cmd_events(argparse.Namespace(interval=0.01))
+        messages = [json.loads(line) for line in out.getvalue().splitlines() if line]
+        self.assertEqual(messages[-1]["phase"], "stopped")
+        self.assertEqual(messages[-1]["detail"], "stream not started")
 
 
 class RearrangeTest(_TempPaths):

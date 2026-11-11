@@ -80,6 +80,37 @@ class BootstrapTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["venvExists"])
 
+    def test_provision_reports_failure_instead_of_raising(self):
+        import tempfile
+        from unittest import mock
+
+        bootstrap = _load("bootstrap")
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = Path(tmp) / "venv"
+            failure = bootstrap.subprocess.CalledProcessError(1, ["pip"])
+            with mock.patch.object(bootstrap, "STATE_DIR", Path(tmp)), \
+                    mock.patch.object(bootstrap, "VENV_DIR", venv), \
+                    mock.patch.object(bootstrap, "check", return_value={
+                        "ok": False,
+                        "missingPython": ["pychromecast"],
+                        "venvExists": False,
+                    }), \
+                    mock.patch.object(bootstrap, "doctor", return_value={
+                        "ok": False,
+                        "pythonOk": False,
+                        "pipelineOk": True,
+                        "missingPython": ["pychromecast"],
+                        "venvExists": False,
+                    }), \
+                    mock.patch.object(
+                        bootstrap.subprocess, "run", side_effect=failure):
+                result = bootstrap.provision()
+
+        self.assertFalse(result["provisioned"])
+        self.assertIn("private venv setup failed", result["reason"])
+        for key in ("ok", "pythonOk", "pipelineOk", "missingPython", "venvExists"):
+            self.assertIn(key, result)
+
 
 class HlsBufferTest(unittest.TestCase):
     def _buffer(self, **kwargs):
