@@ -4,6 +4,18 @@ All notable changes to omascreencast are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Monitor edits rewrote expression-valued fields.** `_rewrite_call()` replaced
+  every requested field whether or not its current value was a literal, so
+  editing any property of a rule containing `scale = omarchy_monitor_scale`
+  silently flattened the expression to a number. Non-literal fields are now
+  skipped and reported as `preserved` by `save`, and the panel notifies which
+  fields were left untouched. A rewrite that only targets expression fields is
+  a no-op instead of an unnecessary write.
+
 ## [0.1.2] — 2026-11-03
 
 Version-consistency release: everything that landed after 0.1.1, and the version

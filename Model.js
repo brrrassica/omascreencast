@@ -307,15 +307,17 @@ function monitorModes(monitor) {
   return out
 }
 
-// Parse `display_config.py rules` JSON into a safe shape.
+// Parse `display_config.py rules` / `save` JSON into a safe shape.
 function parseDisplayRules(raw) {
-  var result = { ok: false, config: "", rules: [], error: "" }
+  var result = { ok: false, config: "", rules: [], error: "", preserved: [] }
   try {
     var d = JSON.parse(String(raw || ""))
     if (!d || typeof d !== "object") return result
     result.ok = d.ok === true
     result.config = String(d.config || "")
     result.error = String(d.error || "")
+    // Fields left as expressions by `save` (e.g. a dynamic scale).
+    result.preserved = d.preserved instanceof Array ? d.preserved.map(String) : []
     var rules = d.rules instanceof Array ? d.rules : []
     for (var i = 0; i < rules.length; i++) {
       var r = rules[i] || {}
@@ -727,6 +729,7 @@ var _TRANSLATIONS = {
     displays: "displays",
     devices: "devices",
     layout_kept: "Layout kept",
+    layout_expression_kept: "Expression left as-is",
     layout_reverted: "Layout reverted",
     layout_trial: "Layout trial",
     trial_hint: "Keep this layout before it reverts automatically.",
@@ -761,6 +764,7 @@ var _TRANSLATIONS = {
     displays: "layar",
     devices: "perangkat",
     layout_kept: "Tata letak disimpan",
+    layout_expression_kept: "Ekspresi dibiarkan apa adanya",
     layout_reverted: "Tata letak dikembalikan",
     layout_trial: "Uji tata letak",
     trial_hint: "Pertahankan tata letak ini sebelum dikembalikan otomatis.",

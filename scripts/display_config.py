@@ -498,16 +498,27 @@ def render_rule(fields: dict) -> str:
     return f"hl.monitor({{ {body} }})"
 
 
-def _rewrite_call(call: str, updates: dict) -> str:
-    """Rewrite only the literal values of the given fields in one call."""
+def _rewrite_call(call: str, updates: dict) -> tuple[str, list[str]]:
+    """Rewrite only the literal values of the given fields in one call.
+
+    Returns ``(source, preserved)``. Fields whose current value is not a
+    literal (for example ``scale = omarchy_monitor_scale``) are never
+    replaced: the file is not evaluated, so writing a number over an
+    expression would silently destroy the user's rule. Their keys are returned
+    as ``preserved`` so callers can surface the conflict.
+    """
     entries, brace, brace_close = _table_entries(call)
     by_key = {entry["key"]: entry for entry in entries}
     edits: list[tuple[int, int, str]] = []
+    preserved: list[str] = []
 
     for key, value in updates.items():
         rendered = render_value(key, value)
         if key in by_key:
             entry = by_key[key]
+            if entry["value"] is None:
+                preserved.append(key)
+                continue
             edits.append((entry["start"], entry["end"], rendered))
 
     missing = [k for k in updates if k not in by_key]
@@ -542,15 +553,18 @@ def _rewrite_call(call: str, updates: dict) -> str:
         out.append(replacement)
         cursor = end
     out.append(call[cursor:])
-    return "".join(out)
+    return "".join(out), preserved
 
 
 def update_rule(text: str, selector: str, fields: dict,
-                aliases: tuple[str, ...] = ()) -> tuple[str, bool]:
+                aliases: tuple[str, ...] = (),
+                preserved: list | None = None) -> tuple[str, bool]:
     """Update the rule for ``selector`` or append one; return (source, changed).
 
     ``aliases`` lets an existing rule keyed by output *name* be migrated to the
-    stable ``desc:`` selector instead of appending a duplicate rule.
+    stable ``desc:`` selector instead of appending a duplicate rule. When
+    ``preserved`` is a list, the non-literal fields left untouched by the
+    rewrite are appended to it.
     """
     rules = parse_rules(text)
     matches = {selector, *aliases}
@@ -559,7 +573,13 @@ def update_rule(text: str, selector: str, fields: dict,
             merged = dict(fields)
             merged["output"] = selector
             call = text[rule["start"]:rule["end"]]
-            rewritten = _rewrite_call(call, merged)
+            rewritten, skipped = _rewrite_call(call, merged)
+            if preserved is not None:
+                preserved.extend(skipped)
+            if rewritten == call:
+                # Every requested field was an expression and stays untouched;
+                # there is nothing to write.
+                return text, False
             return text[:rule["start"]] + rewritten + text[rule["end"]:], True
 
     # No matching rule: append a standalone, fully literal rule.
@@ -754,16 +774,27 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def save_rule(path: Path, monitor: dict, fields: dict) -> dict:
-    """Persist a validated rule for ``monitor``; backup + atomic + validated."""
+    """Persist a validated rule for ``monitor``; backup + atomic + validated.
+
+    Expression-valued fields (``scale = omarchy_monitor_scale`` and friends)
+    are preserved and reported in ``preserved`` instead of being flattened to
+    numbers.
+    """
     selector = selector_for_monitor(monitor)
     merged = dict(fields)
     merged["output"] = selector
     source = read_config(path)
     name = str(monitor.get("name") or "")
     aliases = (name,) if name and name != selector else ()
-    updated, changed = update_rule(source, selector, merged, aliases=aliases)
+    preserved: list[str] = []
+    updated, changed = update_rule(
+        source, selector, merged, aliases=aliases, preserved=preserved,
+    )
     if not changed:
-        return {"ok": True, "changed": False, "selector": selector, "backup": ""}
+        return {
+            "ok": True, "changed": False, "selector": selector,
+            "backup": "", "preserved": preserved,
+        }
 
     # Re-parse what we are about to write; a parse failure must never replace
     # the user's file.
@@ -776,7 +807,10 @@ def save_rule(path: Path, monitor: dict, fields: dict) -> dict:
 
     backup = backup_config(path) if path.exists() else ""
     _atomic_write(path, updated)
-    return {"ok": True, "changed": True, "selector": selector, "backup": backup}
+    return {
+        "ok": True, "changed": True, "selector": selector,
+        "backup": backup, "preserved": preserved,
+    }
 
 
 def restore_config(path: Path) -> dict:

@@ -147,6 +147,36 @@ hl.monitor({
         self.assertFalse(rules[0]["fields"]["disabled"])
         self.assertEqual(rules[0]["fields"]["mirror"], "")
 
+    def test_non_literal_field_is_preserved_on_unrelated_edit(self):
+        # Editing another field of a rule with an expression-valued scale must
+        # not flatten the expression to a number.
+        updated, changed = self.dc.update_rule(SOURCE, "HDMI-A-1", {
+            "output": "HDMI-A-1", "mode": "1920x1080@60", "position": "0x0",
+            "scale": 1.25, "transform": 0, "disabled": False, "mirror": "",
+        })
+        self.assertTrue(changed)
+        self.assertIn("scale = omarchy_monitor_scale", updated)
+        self.assertNotIn("scale = 1.25", updated)
+        self.assertIn('mode = "1920x1080@60"', updated)
+        rules = [r for r in self.dc.parse_rules(updated) if r["output"] == "HDMI-A-1"]
+        self.assertEqual(len(rules), 1)
+        self.assertIn("scale", rules[0]["nonLiteral"])
+
+    def test_non_literal_field_is_reported_as_preserved(self):
+        preserved: list[str] = []
+        self.dc.update_rule(
+            SOURCE, "HDMI-A-1", {"output": "HDMI-A-1", "scale": 2},
+            preserved=preserved,
+        )
+        self.assertEqual(preserved, ["scale"])
+
+    def test_rewrite_of_only_non_literal_field_is_a_no_op(self):
+        updated, changed = self.dc.update_rule(SOURCE, "HDMI-A-1", {
+            "output": "HDMI-A-1", "scale": 2,
+        })
+        self.assertFalse(changed)
+        self.assertEqual(updated, SOURCE)
+
     def test_comment_before_field_is_skipped_when_parsing(self):
         source = '''\
 hl.monitor({
@@ -286,6 +316,20 @@ class SaveRuleTest(unittest.TestCase):
         self.assertTrue(Path(result["backup"]).exists())
         self.assertIn(SOURCE, Path(result["backup"]).read_text())
         self.assertIn('output = "HEADLESS-1"', self.path.read_text())
+
+    def test_save_preserves_expression_scale_and_reports_it(self):
+        self.path.write_text(SOURCE, encoding="utf-8")
+        result = self.dc.save_rule(
+            self.path,
+            {"name": "HDMI-A-1"},
+            {"output": "HDMI-A-1", "mode": "2560x1440@60", "scale": 1.25},
+        )
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["preserved"], ["scale"])
+        text = self.path.read_text()
+        self.assertIn("scale = omarchy_monitor_scale", text)
+        self.assertIn('mode = "2560x1440@60"', text)
+        self.assertNotIn("scale = 1.25", text)
 
     def test_save_uses_desc_selector(self):
         self.path.write_text(SOURCE, encoding="utf-8")
