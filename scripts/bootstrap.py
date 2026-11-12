@@ -88,14 +88,20 @@ def provision() -> dict:
         status["reason"] = "system packages present"
         return status
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    if not VENV_DIR.exists():
-        subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
-    pip = VENV_DIR / "bin" / "pip"
-    subprocess.run(
-        [str(pip), "install", "--upgrade", "pychromecast", "zeroconf"],
-        check=True,
-    )
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if not VENV_DIR.exists():
+            subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
+        pip = VENV_DIR / "bin" / "pip"
+        subprocess.run(
+            [str(pip), "install", "--upgrade", "pychromecast", "zeroconf"],
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        report = doctor()
+        report["provisioned"] = False
+        report["reason"] = f"private venv setup failed: {exc}"
+        return report
     report = doctor()
     report["provisioned"] = True
     report["reason"] = "installed into private venv"

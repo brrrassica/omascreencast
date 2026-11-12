@@ -709,6 +709,8 @@ def reconcile(
             reasons.append("output missing")
         if pid and not pid_ours:
             reasons.append("stream not running")
+        if not pid and phase in ("starting", "casting"):
+            reasons.append("stream not started")
         if phase == "stopped" and not pid:
             reasons.append("cast stopped")
 
@@ -866,7 +868,10 @@ def _create(args: argparse.Namespace) -> int:
             port=args.port,
             codec=args.codec,
         )
-        pid = spawn_stream(command)
+        try:
+            pid = spawn_stream(command)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SessionError(f"could not start the cast engine: {exc}") from exc
         if not pid:
             raise SessionError("could not start the cast engine")
         active = update_active({"pid": pid}) or active
@@ -1026,6 +1031,9 @@ def cmd_events(args: argparse.Namespace) -> int:
             _emit({"type": "phase", "phase": "idle", "detail": "session ended"})
             return 0
         current_pid = current.get("pid")
+        if not current_pid and str(current.get("phase") or "") in ("starting", "casting"):
+            _emit({"type": "phase", "phase": "stopped", "detail": "stream not started"})
+            return 0
         if current_pid:
             pid = current_pid
         if pid and not pid_is_engine(pid):
