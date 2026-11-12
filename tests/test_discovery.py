@@ -183,6 +183,28 @@ class DiscoverOnceTest(unittest.TestCase):
         self.cast._apply_cached_codecs([dev], cache)
         self.assertEqual(dev.codecs, ["hevc", "h264"])
 
+    def test_zeroconf_oserror_returns_empty(self):
+        class _UnavailableZeroconf:
+            def __init__(self):
+                raise OSError("no interfaces to listen on")
+
+        stub = mock.Mock(Zeroconf=_UnavailableZeroconf)
+        with mock.patch.dict(sys.modules, {"zeroconf": stub}):
+            devices = self.cast._zeroconf_discover(0.01, logging.getLogger("test"))
+        self.assertEqual(devices, [])
+
+    def test_zeroconf_oserror_lets_avahi_fallback_run(self):
+        class _UnavailableZeroconf:
+            def __init__(self):
+                raise OSError("no interfaces to listen on")
+
+        stub = mock.Mock(Zeroconf=_UnavailableZeroconf)
+        with mock.patch.dict(sys.modules, {"zeroconf": stub}), \
+             mock.patch.object(self.cast, "_avahi_discover", return_value=[]) as avahi:
+            devices = self.cast.discover_once(0.01, logging.getLogger("test"))
+        self.assertEqual(devices, [])
+        avahi.assert_called_once()
+
 
 class DiscoveryEventShapeTest(unittest.TestCase):
     """The JSONL contract the QML SplitParser consumes."""

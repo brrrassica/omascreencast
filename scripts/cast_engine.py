@@ -1197,8 +1197,18 @@ def _zeroconf_discover(timeout: float, log: logging.Logger) -> list[Device]:
         def remove_service(self, zc, type_, name):  # noqa: N802
             pass
 
-    zc = Zeroconf()
-    browser = ServiceBrowser(zc, SERVICE_TYPE, _Listener())
+    zc = None
+    try:
+        zc = Zeroconf()
+        browser = ServiceBrowser(zc, SERVICE_TYPE, _Listener())
+    except (OSError, RuntimeError) as exc:
+        if zc is not None:
+            try:
+                zc.close()
+            except Exception:  # noqa: BLE001 - cleanup must not mask the error
+                pass
+        log.warning("zeroconf discovery failed: %s", exc)
+        return []
     try:
         time.sleep(timeout)
     finally:
@@ -1336,8 +1346,19 @@ def _watch(args: argparse.Namespace, log: logging.Logger) -> int:
                         dev.online = False
             publish()
 
-    zc = Zeroconf()
-    browser = ServiceBrowser(zc, SERVICE_TYPE, _Listener())
+    zc = None
+    try:
+        zc = Zeroconf()
+        browser = ServiceBrowser(zc, SERVICE_TYPE, _Listener())
+    except (OSError, RuntimeError) as exc:
+        if zc is not None:
+            try:
+                zc.close()
+            except Exception:  # noqa: BLE001 - cleanup must not mask the error
+                pass
+        log.error("zeroconf discovery failed: %s", exc)
+        emit({"type": "phase", "phase": "error", "detail": f"zeroconf unavailable: {exc}"})
+        return 1
     emit({"type": "phase", "phase": "discovering", "detail": "browsing mDNS"})
     publish()  # initial, possibly empty, snapshot (still marked `browsing`)
 
