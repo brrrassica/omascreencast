@@ -990,7 +990,15 @@ Item {
       onStreamFinished: {
         var r = Model.parseDisplayRules(text)
         root.displayBusy = false
-        if (!r.ok) root.displayError = r.error !== "" ? r.error : "Could not save the display layout"
+        if (!r.ok) {
+          root.displayError = r.error !== "" ? r.error : "Could not save the display layout"
+        } else if (r.preserved.length > 0) {
+          // Expression-valued fields are never flattened; tell the user which
+          // ones stayed untouched so the saved rule is not a surprise.
+          root.notify(
+            Model.tr(uiLanguage, "layout_expression_kept"),
+            r.preserved.join(", "), "low")
+        }
         root.refreshMonitors()
         root.refreshDisplayRules()
       }

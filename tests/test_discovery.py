@@ -234,6 +234,9 @@ const bogus = M.parseSession("not json");
 const displayRules = M.parseDisplayRules(JSON.stringify({ ok: true, rules: [
   { output: "eDP-1", fields: { output: "eDP-1", mode: "1920x1080@60", position: "0x0", scale: 1, transform: 0, disabled: false, mirror: "" }, nonLiteral: [] }
 ]}));
+const savedRules = M.parseDisplayRules(JSON.stringify({
+  ok: true, changed: true, preserved: ["scale"]
+}));
 const edp = { name: "eDP-1", description: "BOE 0x0A1F", width: 1920, height: 1080, scale: 1,
   x: 0, y: 0, transform: 0, disabled: false, availableModes: ["1920x1080@60.00Hz", "1280x720@60.00Hz"] };
 const virtual = { name: "HEADLESS-1", width: 1920, height: 1080, scale: 1, x: 1920, y: 0 };
@@ -266,6 +269,7 @@ process.stdout.write(JSON.stringify({
     ? M.monitorSessionLabel(monitors[1], sess.active, ev.devices) : "",
   bogusSessionSafe: bogus.active === null && bogus.ok === false,
   displayRulesOk: displayRules.ok,
+  savedPreserved: savedRules.preserved,
   displaySelector: M.monitorSelector(edp),
   displayRuleFound: M.displayRuleFor(edp, displayRules.rules) !== null,
   modes: M.monitorModes(edp),
@@ -317,6 +321,8 @@ class ModelJsTest(unittest.TestCase):
         self.assertEqual(out["monitorSuffix"], " → BRAVIA")
         self.assertTrue(out["bogusSessionSafe"])
         self.assertTrue(out["displayRulesOk"])
+        # A save that preserved expression fields reports which ones.
+        self.assertEqual(out["savedPreserved"], ["scale"])
         self.assertEqual(out["displaySelector"], "desc:BOE 0x0A1F")
         self.assertTrue(out["displayRuleFound"])
         self.assertEqual(out["modes"], ["1920x1080@60", "1280x720@60"])
