@@ -13,10 +13,12 @@ import contextlib
 import importlib.util
 import io
 import json
+import signal
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -322,6 +324,19 @@ class ReconcileTest(_TempPaths):
         self.assertIn("cast stopped", result["reasons"])
         self.assertEqual(removed, ["HEADLESS-1"])
 
+    def test_stopped_session_output_is_not_reported_as_orphan(self):
+        self._active(pid=None, phase="stopped")
+        removed = []
+        result = self.session.reconcile(
+            monitors=[{"name": "HEADLESS-1"}],
+            alive=lambda _pid: True,
+            remove=removed.append,
+        )
+        self.assertTrue(result["cleaned"])
+        self.assertEqual(removed, ["HEADLESS-1"])
+        self.assertEqual(result["orphans"], [])
+        self.assertEqual(result["cleanedOrphans"], [])
+
     def test_pid_less_starting_session_is_cleaned(self):
         self._active(pid=None, phase="starting")
         removed = []
@@ -381,6 +396,45 @@ class ReconcileTest(_TempPaths):
             engine=lambda _pid: True,
         )
         self.assertEqual(result["orphans"], ["HEADLESS-2"])
+
+
+class SignalTreeTest(_TempPaths):
+    def test_group_leader_signals_its_process_group(self):
+        calls = []
+        with mock.patch.object(self.session.os, "getpgid", return_value=12), \
+             mock.patch.object(
+                 self.session.os, "killpg",
+                 side_effect=lambda pgid, sig: calls.append((pgid, sig)),
+             ), \
+             mock.patch.object(
+                 self.session.os, "kill",
+                 side_effect=AssertionError("must not signal a PID individually"),
+             ):
+            signalled = self.session._signal_tree(12, signal.SIGTERM)
+        self.assertTrue(signalled)
+        self.assertEqual(calls, [(12, signal.SIGTERM)])
+
+    def test_non_leader_signals_pid_and_descendants_not_group(self):
+        calls = []
+        with mock.patch.object(self.session.os, "getpgid", return_value=99), \
+             mock.patch.object(
+                 self.session.os, "killpg",
+                 side_effect=AssertionError("must not signal the shared group"),
+             ), \
+             mock.patch.object(
+                 self.session, "_descendant_pids", return_value=[23, 24]
+             ), \
+             mock.patch.object(
+                 self.session.os, "kill",
+                 side_effect=lambda pid, sig: calls.append((pid, sig)),
+             ):
+            signalled = self.session._signal_tree(12, signal.SIGTERM)
+        self.assertTrue(signalled)
+        self.assertEqual(calls, [
+            (12, signal.SIGTERM),
+            (23, signal.SIGTERM),
+            (24, signal.SIGTERM),
+        ])
 
 
 class KeepAndTeardownTest(_TempPaths):

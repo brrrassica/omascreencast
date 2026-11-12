@@ -291,26 +291,75 @@ def pid_is_engine(pid) -> bool:
     return _pid_matches_engine(pid)
 
 
+def _child_pids(pid: int) -> list[int]:
+    """Return ``pid``'s direct children from procfs, best effort."""
+    children: list[int] = []
+    tasks = Path("/proc") / str(pid) / "task"
+    try:
+        entries = list(tasks.iterdir())
+    except OSError:
+        return children
+    for entry in entries:
+        try:
+            raw = (entry / "children").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for part in raw.split():
+            try:
+                child = int(part)
+            except ValueError:
+                continue
+            if child > 0 and child not in children:
+                children.append(child)
+    return children
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    """Return every descendant of ``pid`` recorded in procfs."""
+    found: list[int] = []
+    seen = {pid}
+    pending = [pid]
+    while pending:
+        parent = pending.pop()
+        for child in _child_pids(parent):
+            if child in seen:
+                continue
+            seen.add(child)
+            found.append(child)
+            pending.append(child)
+    return found
+
+
 def _signal_tree(pid: int, sig: int) -> bool:
-    """Signal the stream's process group (it is spawned in a new session)."""
+    """Signal the stream process tree without ever hitting a shared group.
+
+    ``spawn_stream`` starts a new session, so the engines we spawn are group
+    leaders and ``killpg`` covers their whole tree. Engines discovered by
+    scanning ``/proc`` may share a launcher's process group; signalling that
+    group would also hit unrelated shells and jobs, so those are signalled
+    individually along with their explicit procfs descendants.
+    """
     try:
         pgid = os.getpgid(pid)
     except OSError:
         pgid = None
-    try:
-        if pgid is not None:
-            os.killpg(pgid, sig)
-        else:
-            os.kill(pid, sig)
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
+    if pgid is not None and pgid == pid:
         try:
-            os.kill(pid, sig)
+            os.killpg(pgid, sig)
             return True
-        except OSError:
+        except ProcessLookupError:
             return False
+        except OSError:
+            pass
+    targets = [pid] + _descendant_pids(pid)
+    delivered = False
+    for target in targets:
+        try:
+            os.kill(target, sig)
+            delivered = True
+        except OSError:
+            continue
+    return delivered
 
 
 def stop_process(pid, timeout: float = STREAM_STOP_TIMEOUT) -> bool:
@@ -725,6 +774,9 @@ def reconcile(
                     removed = False
             if name and removed:
                 owned = [item for item in owned if item != name]
+                # The output is gone; keep the later orphan scan from treating
+                # the pre-cleanup monitor snapshot as still-existing output.
+                names.discard(name)
             state["active"] = None
             result["cleaned"] = True
             result["reasons"] = reasons
