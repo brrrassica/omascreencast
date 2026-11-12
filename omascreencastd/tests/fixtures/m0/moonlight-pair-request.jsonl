@@ -1,0 +1,8 @@
+# Request-shape capture: the first pairing request a real Moonlight client sends.
+# Provenance: 2026-11-12T12:45Z, Moonlight 6.2.0 (moonlight-qt CLI) -> omascreencastd.
+# Captured by the daemon's own request log (it terminates TLS, so it sees plaintext).
+# Redactions: the client certificate DER is truncated and its hash is omitted; the
+# client id and uuid are verbatim from the capture because neither is a secret.
+# This is NOT a known-answer vector: it has no expect block because the exchange
+# does not yet complete a proof. See README.md.
+{"name":"moonlight-pair-getservercert-request","captured_at":"2026-11-12T12:45Z","client":"Moonlight 6.2.0 (moonlight-qt CLI)","server":"omascreencastd","task":"M0-T5","method":"daemon request log","request":{"method":"GET","path":"/pair","query_pairs":[["uniqueid","cdedeaf2d1604fae"],["uuid","1d234225ccb94693b35ed4765928d2c7"],["devicename","roth"],["updateState","1"],["phrase","getservercert"],["salt","5c23b063cfcda4c0a34917afdf4fe40a"],["clientcert","<hex DER, present, truncated in this fixture>"]],"headers":[["user-agent","Mozilla/5.0"]],"body":""},"findings":{"pair_is_a_phrase_dispatcher":true,"salt_is_client_chosen":true,"client_cert_arrives_in_query":true,"pairing_starts_on_plaintext_discovery":true}}

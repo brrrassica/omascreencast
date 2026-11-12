@@ -152,11 +152,47 @@ fn serve_connection(stream: TcpStream, address: SocketAddr, state: &DaemonState)
 }
 
 fn respond(state: &DaemonState, request: &crate::request::Request, address: &str) -> Response {
-    // Only discovery is served here. Everything else is a 404 envelope, matching
-    // the captured host exactly.
-    if Route::from_path(&request.path) != Some(Route::ServerInfo) {
+    // Discovery serves `/serverinfo`, plus the **pairing start** route.
+    //
+    // That second half is a captured correction, not a convenience. Pointing a
+    // real Moonlight 6.2.0 client at this daemon showed it opening the pairing
+    // exchange here, on plaintext 47989:
+    //
+    // ```text
+    // GET /pair?uniqueid=…&devicename=roth&updateState=1
+    //          &phrase=getservercert&salt=<hex>&clientcert=<hex>
+    // ```
+    //
+    // The earlier belief that 47989 serves *only* `/serverinfo` came from a
+    // `curl` capture and was never exercised by a client doing a pairing. The
+    // client also supplies the salt and presents its certificate up front, so
+    // this listener is where the handshake actually begins.
+    //
+    // The widening is deliberately narrow. `Route::allows_unpaired` decides what
+    // may run without trust, and `/applist`, `/launch`, `/resume`, and `/cancel`
+    // are not in it, so no session or app enumeration is reachable here. Pairing
+    // is unauthenticated by construction (the PIN is the authentication), so
+    // serving its start on the plaintext plane does not lower the bar: the
+    // certificate the client presents here is recorded and still has to survive
+    // the proof exchange before it is trusted.
+    let route = Route::from_path(&request.path);
+    let Some(route) = route else {
+        tracing::warn!(
+            path = %request.path,
+            address = %address,
+            "discovery rejected an unknown route"
+        );
         return Response::error(Route::ServerInfo, &crate::HttpError::NotFound);
+    };
+    if route != Route::ServerInfo && !route.allows_unpaired() {
+        tracing::warn!(
+            path = %request.path,
+            address = %address,
+            "discovery rejected a trusted-only route"
+        );
+        return Response::error(route, &crate::HttpError::NotFound);
     }
+    tracing::debug!(path = %request.path, address = %address, "discovery served a route");
     let peer = Peer {
         address,
         fingerprint: None,
@@ -244,9 +280,26 @@ mod tests {
     }
 
     #[test]
-    fn every_other_path_is_a_404_envelope_and_does_not_pair() {
+    fn pairing_start_is_served_but_session_routes_are_not() {
+        // Corrected by a client-driven capture (2026-11-12): a real Moonlight
+        // opens the pairing handshake on this listener via
+        // `/pair?…&phrase=getservercert`. The earlier version of this test
+        // asserted `/pair` was a 404 here, which encoded the wrong belief that
+        // came from `curl` and blocked every real client at the first request.
         let (_dir, server) = harness();
-        for path in ["/pair", "/applist", "/launch", "/nope"] {
+        let pairing = get(&server, "/pair?phrase=getservercert&salt=0011");
+        assert!(pairing.starts_with("HTTP/1.1 200 OK"));
+        assert!(
+            pairing.contains("BEGIN CERTIFICATE"),
+            "serves the host cert"
+        );
+
+        // The security property that must survive the widening: nothing that
+        // starts or tears down a *session* is reachable here. `/applist` is
+        // deliberately absent from this list: it is an unpaired route because
+        // Moonlight asks for it before a launch, and it exposes only the one
+        // synthetic Desktop entry.
+        for path in ["/launch", "/resume", "/cancel", "/nope"] {
             let response = get(&server, path);
             assert!(response.starts_with("HTTP/1.1 200 OK"), "{path}");
             assert!(response.contains(r#"status_code="404""#), "{path}");

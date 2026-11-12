@@ -7,6 +7,7 @@ for the field meanings.
 |---|---|---|---|---|---|---|---|
 | [`../http/oracle-unpaired.jsonl`](../http/oracle-unpaired.jsonl) | 2026-11-11T02:44Z | `curl` (stand-in; Moonlight capture pending) | `sunshine` (local `monitorize/sunshine-1` service) | M0-T5 (partial) | `curl` against the live oracle | `curl -s http://127.0.0.1:47989/serverinfo` on port 47989 | none (discovery exposes no key or PIN) |
 | [`../http/moonlight-discovery.jsonl`](../http/moonlight-discovery.jsonl) | 2026-11-11T03:54Z | Moonlight 6.2.0 (`moonlight-qt` CLI; same `moonlight-common-c` protocol stack as Moonlight for Android TV) | `sunshine` 0.0.0 commit `8d043f2b` (fresh local oracle, never paired) | M0-T5 (partial) | packet capture of plaintext discovery on loopback | `tshark -i lo -s0 -w <pcap> 'tcp port 47989 or ...'`, then `tshark -Y http.request` / `-Y http.response` field extraction | none (discovery exposes no key or PIN) |
+| [`moonlight-pair-request.jsonl`](moonlight-pair-request.jsonl) | 2026-11-12T12:45Z | Moonlight 6.2.0 (`moonlight-qt` CLI) | `omascreencastd` (this repo) | M0-T5 (pairing request shape) | the daemon's own request log; it terminates TLS so it sees the plaintext request | `moonlight pair <host> --pin <pin>` against a local `omascreencastd serve`, `RUST_LOG=debug` | client certificate DER truncated (present, not reproduced) |
 
 ## What the captures proved (and why they changed the daemon)
 
@@ -30,6 +31,8 @@ capture existed:
 5. **Only `/serverinfo` is served on 47989.** `/pair`, `/applist`, `/launch`, and
    `/` all return the same `404` envelope, so pairing cannot be started over the
    unauthenticated socket.
+   **Superseded 2026-11-12 by finding 11 below.** This was a `curl` probe, not a
+   client pairing; a real client does start pairing on 47989.
 6. **`ExternalPort` echoes the serving port**, not `HttpsPort` (47989 vs 47984).
    The daemon reports the HTTPS port instead; the divergence is asserted nowhere.
 7. **`currentgame` is a 32-bit integer** on the wire; the DTO was widened from
@@ -54,6 +57,36 @@ Findings from the Moonlight-driven capture (`moonlight-discovery.jsonl`),
     accepted both ("Latest supported GFE server: 99.99.99.99" either way).
     Which value a real Android TV build requires remains an open spike on the
     TV itself.
+
+Findings from the pairing-start capture (`moonlight-pair-request.jsonl`),
+2026-11-12 — these **overturn four M1 assumptions**:
+
+11. **Pairing does *not* start on the trusted HTTPS port.** The client's first
+    pairing call is `GET /pair` on the **plaintext discovery listener (47989)**.
+    Finding 5 above ("only `/serverinfo` is served on 47989 … pairing cannot be
+    started over the unauthenticated socket") was inferred from a `curl` probe
+    and had never been exercised by a client that was actually pairing. It is
+    corrected here: the discovery listener now serves the pairing start,
+    gated by `Route::allows_unpaired`, so no session route is reachable there.
+12. **`/pair` is a phrase dispatcher, not one step.** The whole handshake is
+    driven by `phrase=` values on this single path. The separate
+    `/clientchallenge`, `/serverchallengeresp`, and `/clientpairingsecret`
+    routes the M1 design assumed are still served for compatibility, but a real
+    client never calls them.
+13. **The salt is chosen by the client and sent on the first request**
+    (`salt=<32 hex chars>`). The host minting the salt — the M1 design — means
+    the two sides can never agree on key material, so the KDF could not have
+    worked no matter how correct its bytes were. Salt ownership is now a
+    parameter (`PairingManager::begin_with_salt`).
+14. **The client certificate arrives in the query string** (`clientcert=<hex DER>`)
+    on the first request, alongside a TLS client certificate later. Trust
+    anchoring must therefore accept the query parameter as an input, not only
+    the TLS peer certificate.
+
+Also confirmed against the local oracle: **HTTPS `/pair` without a usable
+client certificate answers a self-closing `<root status_code="404"/>`**, which
+matches the XML envelope and shows the pairing route is certificate-gated on the
+trusted port.
 
 ## M0-T3 — FEC 0 with a real client (2026-11-11, partial)
 

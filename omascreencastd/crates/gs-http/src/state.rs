@@ -392,10 +392,36 @@ impl DaemonState {
         name: &str,
         address: &str,
     ) -> Result<gs_crypto::PendingInfo, HttpError> {
+        self.begin_pairing_with_salt(name, address, None)
+    }
+
+    /// Begin a pairing session, optionally with the salt the client chose.
+    ///
+    /// A captured Moonlight client selects the salt and sends it on the first
+    /// `/pair` request, so the host must adopt it rather than invent one. The
+    /// value arrives hex-encoded; a malformed one falls back to a host-generated
+    /// salt instead of failing the request, because a client that cannot pair
+    /// needs to see an explicit protocol error, not a silent expiry.
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError`] when the bounded store is full or the salt cannot be made.
+    pub fn begin_pairing_with_salt(
+        &self,
+        name: &str,
+        address: &str,
+        salt_hex: Option<String>,
+    ) -> Result<gs_crypto::PendingInfo, HttpError> {
         let now = self.now();
+        let salt = salt_hex
+            .as_deref()
+            .and_then(|value| crate::xml::hex_decode(value).ok())
+            .filter(|decoded| !decoded.is_empty());
         let (info, event) = {
             let mut shared = self.shared();
-            shared.pairing.begin(ClientInfo::new(name, address), now)?
+            shared
+                .pairing
+                .begin_with_salt(ClientInfo::new(name, address), now, salt)?
         };
         if let PairingEvent::Pending { id, name, address } = event {
             self.inner

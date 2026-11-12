@@ -121,10 +121,21 @@ pub fn handle(state: &DaemonState, request: &Request, peer: Peer<'_>) -> Respons
         Route::Resume => resume(state, request),
         Route::Cancel => cancel(state),
     };
-    match result {
+    let response = match result {
         Ok(response) => response,
         Err(error) => Response::error(route, &error),
-    }
+    };
+    // The bodies of the pairing phases are the contract a real client either
+    // accepts or refuses, and a refusal shows up only as an opaque client-side
+    // failure. Logging what we actually sent is what makes that loop debuggable
+    // and is how the captured vectors in `tests/fixtures/pairing/` were derived.
+    tracing::debug!(
+        route = route.path(),
+        status = response.status,
+        body = %String::from_utf8_lossy(&response.body),
+        "gamestream response"
+    );
+    response
 }
 
 /// A route for error rendering when the path did not match.
@@ -154,12 +165,49 @@ fn pair(state: &DaemonState, request: &Request, peer: Peer<'_>) -> Result<Respon
         .query_param("devicename")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| String::from("Unknown device"));
-    // Reuse the address's live session so a retried `/pair` does not fill the
-    // bounded store with duplicates, then report that pairing is in progress.
-    if state.session_for_address(peer.address).is_none() {
-        state.begin_pairing(&name, peer.address)?;
+    // `/pair` is not one step, it is a **phrase dispatcher**. A captured
+    // Moonlight 6.2.0 client drives the whole handshake through this one path:
+    //
+    // ```text
+    // GET /pair?…&phrase=getservercert&salt=<hex>&clientcert=<hex>
+    // ```
+    //
+    // An earlier design put each phase on its own route (`/clientchallenge`,
+    // `/serverchallengeresp`, `/clientpairingsecret`). Those routes are still
+    // served, but a real client never calls them: it switches on `phrase`. So
+    // the phrase is read here and dispatched, and the dedicated routes remain as
+    // a compatibility surface for clients that do use them.
+    let phrase = request
+        .query_param("phrase")
+        .unwrap_or_else(|| String::from("getservercert"));
+    match phrase.as_str() {
+        // The client wants the host certificate to continue the exchange. It
+        // arrives together with the client's own certificate and a client-chosen
+        // salt, all on the first request.
+        "getservercert" => {
+            let pem = std::str::from_utf8(state.identity().certificate_pem())
+                .map_err(|error| HttpError::Internal(error.to_string()))?;
+            // Remember the pairing attempt (and the salt the client chose) so the
+            // custom-approval and proof phases have a session to hang off.
+            if state.session_for_address(peer.address).is_none() {
+                state.begin_pairing_with_salt(
+                    &name,
+                    peer.address,
+                    request.query_param("salt").as_deref().map(str::to_owned),
+                )?;
+            }
+            Ok(xml_response(xml::server_certificate(pem)))
+        }
+        // Unknown phrase: answer the acknowledgement the state machine already
+        // models, and log it, because an unseen phrase is a protocol finding.
+        other => {
+            tracing::warn!(phrase = %other, address = %peer.address, "unhandled pairing phrase");
+            if state.session_for_address(peer.address).is_none() {
+                state.begin_pairing(&name, peer.address)?;
+            }
+            Ok(xml_response(xml::status(true)))
+        }
     }
-    Ok(xml_response(xml::status(true)))
 }
 
 fn client_challenge(

@@ -333,13 +333,43 @@ impl PairingManager {
         client: ClientInfo,
         now: SystemTime,
     ) -> Result<(PendingInfo, PairingEvent), PairingError> {
+        self.begin_with_salt(client, now, None)
+    }
+
+    /// Open a pairing session with a salt supplied by the caller.
+    ///
+    /// # Why the salt is a parameter
+    ///
+    /// A captured Moonlight client **chooses the salt itself** and sends it on the
+    /// first pairing request (`/pair?…&phrase=getservercert&salt=<hex>`). The
+    /// earlier design had the host mint the salt, which is the opposite
+    /// direction: it meant the client and host could never agree on the key
+    /// material, so the exchange could not succeed against a real client no
+    /// matter how correct the KDF was.
+    ///
+    /// `None` asks the host to generate one, which is kept for tests and for a
+    /// client that omits the parameter.
+    ///
+    /// # Errors
+    ///
+    /// - [`PairingError::TooManyPending`] when the bound is already reached;
+    /// - [`PairingError::Crypto`] when a host-generated salt fails.
+    pub fn begin_with_salt(
+        &mut self,
+        client: ClientInfo,
+        now: SystemTime,
+        salt: Option<Vec<u8>>,
+    ) -> Result<(PendingInfo, PairingEvent), PairingError> {
         self.expire(now);
         if self.pending_count() >= self.max_pending {
             return Err(PairingError::TooManyPending {
                 max: self.max_pending,
             });
         }
-        let salt = self.crypto.new_salt()?;
+        let salt = match salt {
+            Some(salt) if !salt.is_empty() => salt,
+            _ => self.crypto.new_salt()?,
+        };
         let mut id = random_hex(PAIRING_ID_LEN)?;
         // A collision is astronomically unlikely, but the store is keyed by id
         // and silently replacing a session would be worse than a retry.
