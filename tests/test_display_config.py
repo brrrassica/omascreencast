@@ -86,6 +86,20 @@ hl.monitor({ output = "DP-1", position = "1920x0" })
 '''
         self.assertEqual([r["output"] for r in self.dc.parse_rules(source)], ["DP-1"])
 
+    def test_huge_numeric_literal_is_non_literal_without_crashing(self):
+        digits = "9" * 4301
+        source = f'hl.monitor({{ output = "eDP-1", scale = {digits} }})\n'
+        rules = self.dc.parse_rules(source)
+        self.assertEqual(len(rules), 1)
+        self.assertIn("scale", rules[0]["nonLiteral"])
+        self.assertNotIn("scale", rules[0]["fields"])
+        updated, changed = self.dc.update_rule(source, "eDP-1", {
+            "output": "eDP-1", "scale": 1.5,
+        })
+        self.assertFalse(changed)
+        self.assertEqual(updated, source)
+        self.assertIn(f"scale = {digits}", updated)
+
 
 class RewriteTest(unittest.TestCase):
     def setUp(self):
