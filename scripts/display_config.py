@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -259,7 +260,13 @@ def _parse_literal(raw: str):
         return False
     if _NUMBER_RE.match(text):
         try:
-            return float(text) if "." in text else int(text)
+            if "." in text:
+                value = float(text)
+                # A decimal literal with enough digits before the point
+                # overflows to infinity. Treat it as non-literal so callers
+                # preserve it instead of emitting invalid JSON (`Infinity`).
+                return value if math.isfinite(value) else None
+            return int(text)
         except (ValueError, OverflowError):
             # Python bounds int() digit strings (3.11+); an absurdly long
             # literal is not safely usable, so treat it as non-literal and
@@ -430,9 +437,9 @@ def validate_field(key: str, value):
     if key == "scale":
         try:
             scale = float(value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ConfigError(f"invalid scale: {value!r}") from exc
-        if not 0 < scale <= 4:
+        if not math.isfinite(scale) or not 0 < scale <= 4:
             raise ConfigError(f"invalid scale: {value!r} (expected 0 < scale <= 4)")
         return scale
     if key == "transform":
@@ -440,7 +447,7 @@ def validate_field(key: str, value):
             raise ConfigError(f"invalid transform: {value!r}")
         try:
             transform = int(value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ConfigError(f"invalid transform: {value!r}") from exc
         if transform not in range(0, 8):
             raise ConfigError(f"invalid transform: {value!r} (expected 0-7)")

@@ -100,6 +100,17 @@ hl.monitor({ output = "DP-1", position = "1920x0" })
         self.assertEqual(updated, source)
         self.assertIn(f"scale = {digits}", updated)
 
+    def test_decimal_literal_overflowing_float_is_non_literal(self):
+        literal = "9" * 400 + ".0"
+        source = f'hl.monitor({{ output = "eDP-1", scale = {literal} }})\n'
+        rules = self.dc.parse_rules(source)
+        self.assertEqual(len(rules), 1)
+        self.assertIn("scale", rules[0]["nonLiteral"])
+        self.assertNotIn("scale", rules[0]["fields"])
+        # `rules` is serialized for Model.js, whose JSON.parse rejects
+        # non-standard `Infinity` tokens.
+        self.assertNotIn("Infinity", json.dumps(rules))
+
 
 class RewriteTest(unittest.TestCase):
     def setUp(self):
@@ -252,7 +263,9 @@ class ValidationTest(unittest.TestCase):
             {"output": "eDP-1", "mode": "not-a-mode"},
             {"output": "eDP-1", "position": "0,0"},
             {"output": "eDP-1", "scale": 0},
+            {"output": "eDP-1", "scale": int("9" * 400)},
             {"output": "eDP-1", "transform": 9},
+            {"output": "eDP-1", "transform": 1e400},
             {"output": "eDP-1", "disabled": "yes"},
             {"output": "eDP-1", "bogus": 1},
         ):
