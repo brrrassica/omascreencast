@@ -426,6 +426,21 @@ class SaveRuleTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(self.path.read_text(), SOURCE)
 
+    def test_restore_skips_a_corrupt_newest_backup(self):
+        self.path.write_text("-- current\n", encoding="utf-8")
+        older = self.path.with_suffix(
+            self.path.suffix + ".omascreencast-20200101T000000Z.bak"
+        )
+        newer = self.path.with_suffix(
+            self.path.suffix + ".omascreencast-20250101T000000Z.bak"
+        )
+        older.write_text(SOURCE, encoding="utf-8")
+        newer.write_text('hl.monitor({ output = "broken"', encoding="utf-8")
+        result = self.dc.restore_config(self.path)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["restored"], str(older))
+        self.assertEqual(self.path.read_text(), SOURCE)
+
     def test_restore_refuses_a_corrupt_backup(self):
         self.path.write_text(SOURCE, encoding="utf-8")
         backup = Path(self.dc.backup_config(self.path))

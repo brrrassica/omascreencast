@@ -816,18 +816,34 @@ def save_rule(path: Path, monitor: dict, fields: dict) -> dict:
 def restore_config(path: Path) -> dict:
     """Restore the newest valid backup atomically (M6 recovery).
 
-    The restored backup is parsed first; a corrupt backup can never replace the
+    Candidates are tried newest-to-oldest; an unreadable or corrupt backup is
+    skipped so a bad newest backup does not block an older valid one. The
+    restored backup is parsed first; a corrupt backup can never replace the
     current file. The current file is backed up before restoring, so a restore
     is itself reversible.
     """
-    backup = latest_backup(path)
-    if backup is None:
+    backups = _backups(path)
+    if not backups:
         raise ConfigError(f"no backup found for {path}")
-    try:
-        content = backup.read_text(encoding="utf-8")
-        parse_rules(content)
-    except (OSError, ConfigError) as exc:
-        raise ConfigError(f"refusing to restore unreadable backup {backup}: {exc}") from exc
+    content = ""
+    backup = None
+    failures: list[str] = []
+    for candidate in reversed(backups):
+        try:
+            candidate_content = candidate.read_text(encoding="utf-8")
+            if not candidate_content.strip():
+                raise ConfigError("backup is empty")
+            parse_rules(candidate_content)
+        except (OSError, ConfigError) as exc:
+            failures.append(f"{candidate}: {exc}")
+            continue
+        content = candidate_content
+        backup = candidate
+        break
+    if backup is None:
+        raise ConfigError(
+            "refusing to restore unreadable backup(s): " + "; ".join(failures)
+        )
     previous = backup_config(path) if path.exists() else ""
     _atomic_write(path, content)
     return {"ok": True, "restored": str(backup), "backup": previous}
