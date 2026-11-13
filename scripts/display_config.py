@@ -258,7 +258,13 @@ def _parse_literal(raw: str):
     if text == "false":
         return False
     if _NUMBER_RE.match(text):
-        return float(text) if "." in text else int(text)
+        try:
+            return float(text) if "." in text else int(text)
+        except (ValueError, OverflowError):
+            # Python bounds int() digit strings (3.11+); an absurdly long
+            # literal is not safely usable, so treat it as non-literal and
+            # preserve it rather than escaping as a raw ValueError.
+            return None
     return None
 
 
