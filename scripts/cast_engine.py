@@ -341,7 +341,12 @@ class HlsBuffer:
 
 def _int_between(name: str, prefix: str, suffix: str) -> int | None:
     core = name[len(prefix):-len(suffix)]
-    return int(core) if core.isdigit() else None
+    # Reject names int() cannot handle: non-ASCII "digits" (e.g. superscripts)
+    # and cores past Python's integer-conversion limit. Both are untrusted
+    # request paths, so fall through to the normal 404 path instead.
+    if not core.isascii() or not core.isdigit() or len(core) > 18:
+        return None
+    return int(core)
 
 
 # ---------------------------------------------------------------------------

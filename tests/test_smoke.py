@@ -136,6 +136,17 @@ class HlsBufferTest(unittest.TestCase):
         self.assertEqual(buf.get("seg0.m4s")[0], b"P0P1")
         self.assertIsNone(buf.get("missing.m4s"))
 
+    def test_oversized_and_non_ascii_numeric_names_are_not_found(self):
+        _cast, buf = self._buffer()
+        buf.set_init(b"INIT")
+        buf.add_part(b"P0")
+        huge = "9" * 5000
+        self.assertIsNone(buf.get(f"part{huge}.m4s"))
+        self.assertIsNone(buf.get(f"seg{huge}.m4s"))
+        # isdigit() accepts these, but int() would raise ValueError.
+        self.assertIsNone(buf.get("part².m4s"))
+        self.assertIsNone(buf.get("seg².m4s"))
+
     def test_buffer_is_bounded(self):
         _cast, buf = self._buffer()
         buf.set_init(b"INIT")
@@ -237,6 +248,25 @@ class HlsHandlerTest(unittest.TestCase):
             conn.request("GET", "/missing.m4s")
             self.assertEqual(conn.getresponse().status, 404)
             conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_oversized_numeric_path_is_404(self):
+        cast = _load("cast_engine")
+        buf = cast.HlsBuffer(part_dur=0.5, seg_parts=2, list_parts=4, keep_segments=2)
+        buf.set_init(b"INIT")
+        handler = cast.make_handler(buf, logging.getLogger("test"))
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        path = "/part" + "9" * 5000 + ".m4s"
+        try:
+            for method in ("GET", "HEAD"):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request(method, path)
+                self.assertEqual(conn.getresponse().status, 404)
+                conn.close()
         finally:
             server.shutdown()
             server.server_close()
