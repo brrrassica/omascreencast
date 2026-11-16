@@ -889,7 +889,7 @@ def apply_rule(fields: dict) -> dict:
 # CLI
 # ---------------------------------------------------------------------------
 def _emit(payload: dict) -> None:
-    print(json.dumps(payload, separators=(",", ":")))
+    print(json.dumps(payload, separators=(",", ":"), allow_nan=False))
 
 
 def _load_rule(raw: str) -> dict:
