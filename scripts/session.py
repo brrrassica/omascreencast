@@ -194,26 +194,28 @@ def mark_stopped(phase: str = "stopped") -> None:
     user's preference (M6). The output is intentionally left in place:
     ``session.py remove`` or reconciliation owns output removal.
     """
-    state = load()
-    active = state.get("active")
-    if not isinstance(active, dict):
-        return
-    active.update({"phase": str(phase or "stopped"), "pid": None, "url": "",
-                   "stoppedAt": _now()})
-    state["active"] = active
-    save(state)
+    with _state_lock():
+        state = load()
+        active = state.get("active")
+        if not isinstance(active, dict):
+            return
+        active.update({"phase": str(phase or "stopped"), "pid": None, "url": "",
+                       "stoppedAt": _now()})
+        state["active"] = active
+        _save_unlocked(state)
 
 
 def clear_active(remove_owned: str = "") -> None:
     """Clear the active session while preserving the output registry."""
-    state = load()
-    state["active"] = None
-    state["version"] = STATE_VERSION
-    owned = owned_outputs(state)
-    if remove_owned:
-        owned = [name for name in owned if name != remove_owned]
-    state["ownedOutputs"] = owned
-    save(state)
+    with _state_lock():
+        state = load()
+        state["active"] = None
+        state["version"] = STATE_VERSION
+        owned = owned_outputs(state)
+        if remove_owned:
+            owned = [name for name in owned if name != remove_owned]
+        state["ownedOutputs"] = owned
+        _save_unlocked(state)
 
 
 # ---------------------------------------------------------------------------
@@ -983,7 +985,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     # Keep the name in the owned registry when removal failed so the next
     # reconciliation retries it instead of leaking the output forever.
     clear_active(remove_owned=name if removed else "")
-    payload: dict = {"ok": True, "active": None, "removed": True, "name": name}
+    payload: dict = {"ok": True, "active": None, "removed": removed, "name": name}
     if warnings:
         payload["warnings"] = warnings
     _emit(payload)
@@ -1211,29 +1213,40 @@ def teardown() -> dict:
         if stop_process(pid):
             stopped.append(pid)
 
+    query_error = ""
     try:
         present = _monitor_names(list_monitors())
-    except SessionError:
-        present = set()
+    except SessionError as exc:
+        # A failed query is not the same as "no outputs are present": keep the
+        # whole registry so the next reconciliation/cleanup can retry instead
+        # of forgetting every owned output forever.
+        present = None
+        query_error = str(exc)
 
     removed: list[str] = []
-    for name in sorted(names):
-        if name not in present:
-            continue
-        try:
-            remove_output(name)
-            removed.append(name)
-        except SessionError:
-            continue
+    if present is not None:
+        for name in sorted(names):
+            if name not in present:
+                continue
+            try:
+                remove_output(name)
+                removed.append(name)
+            except SessionError:
+                continue
 
-    # Keep the names whose removal failed so the next reconciliation retries.
-    remaining = sorted(name for name in names if name in present and name not in removed)
+        # Keep the names whose removal failed so the next reconciliation retries.
+        remaining = sorted(name for name in names if name in present and name not in removed)
+    else:
+        remaining = sorted(names)
     save({"version": STATE_VERSION, "active": None, "ownedOutputs": remaining})
-    return {
+    payload: dict = {
         "ok": True,
         "removed": removed,
         "stopped": sorted(set(stopped)),
     }
+    if query_error:
+        payload["warnings"] = [f"could not list monitors: {query_error}"]
+    return payload
 
 
 def cmd_teardown(args: argparse.Namespace) -> int:

@@ -94,6 +94,58 @@ class StateFileTest(_TempPaths):
         self.session.clear_active(remove_owned="HEADLESS-1")
         self.assertEqual(self.session.load()["ownedOutputs"], ["HEADLESS-2"])
 
+    def test_mark_stopped_reads_state_under_lock(self):
+        self.session.save({"version": 1, "active": {"name": "HEADLESS-1", "pid": 7}})
+        held = []
+        real_load = self.session.load
+        real_lock = self.session._state_lock
+
+        @contextlib.contextmanager
+        def _lock():
+            with real_lock():
+                held.append(True)
+                try:
+                    yield
+                finally:
+                    held.pop()
+
+        def _load():
+            self.assertTrue(held, "mark_stopped read the state without the lock")
+            return real_load()
+
+        with mock.patch.object(self.session, "_state_lock", _lock), \
+             mock.patch.object(self.session, "load", _load):
+            self.session.mark_stopped()
+        self.assertEqual(self.session.load()["active"]["phase"], "stopped")
+
+    def test_clear_active_reads_state_under_lock(self):
+        self.session.save({
+            "version": 1,
+            "active": {"name": "HEADLESS-1"},
+            "ownedOutputs": ["HEADLESS-1"],
+        })
+        held = []
+        real_load = self.session.load
+        real_lock = self.session._state_lock
+
+        @contextlib.contextmanager
+        def _lock():
+            with real_lock():
+                held.append(True)
+                try:
+                    yield
+                finally:
+                    held.pop()
+
+        def _load():
+            self.assertTrue(held, "clear_active read the state without the lock")
+            return real_load()
+
+        with mock.patch.object(self.session, "_state_lock", _lock), \
+             mock.patch.object(self.session, "load", _load):
+            self.session.clear_active()
+        self.assertIsNone(self.session.load()["active"])
+
     def test_save_retires_legacy_runtime_file(self):
         self.session.LEGACY_RUNTIME_FILE.parent.mkdir(parents=True, exist_ok=True)
         self.session.LEGACY_RUNTIME_FILE.write_text("{}", encoding="utf-8")
@@ -487,6 +539,28 @@ class KeepAndTeardownTest(_TempPaths):
         self.assertEqual(payload["removed"], [])
         self.assertEqual(removed, [])
 
+    def test_teardown_keeps_owned_outputs_when_monitors_cannot_be_listed(self):
+        self.session.save({
+            "version": 1,
+            "active": {"name": "HEADLESS-1", "pid": None, "phase": "casting"},
+            "ownedOutputs": ["HEADLESS-1"],
+        })
+
+        def _fail():
+            raise self.session.SessionError("hyprctl failed")
+
+        self.session.list_monitors = _fail
+        self.session.iter_stream_processes = lambda: []
+        removed = []
+        self.session.remove_output = removed.append
+
+        payload = self.session.teardown()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["removed"], [])
+        self.assertEqual(removed, [])
+        self.assertTrue(payload["warnings"])
+        self.assertEqual(self.session.load()["ownedOutputs"], ["HEADLESS-1"])
+
 
 class CreateLifecycleTest(_TempPaths):
     def _args(self, **overrides) -> argparse.Namespace:
@@ -686,6 +760,24 @@ class RemoveTest(_TempPaths):
         self.assertEqual(stopped, [321])
         self.assertEqual(removed, ["HEADLESS-1"])
         self.assertIsNone(self.session.load()["active"])
+
+    def test_remove_reports_failure_and_keeps_ownership(self):
+        self.session.save({
+            "version": 1,
+            "active": {"name": "HEADLESS-1", "pid": None, "phase": "casting"},
+            "ownedOutputs": ["HEADLESS-1"],
+        })
+
+        def _fail(_name):
+            raise self.session.SessionError("could not remove HEADLESS-1")
+
+        self.session.remove_output = _fail
+        payload = self.emit_command(self.session.cmd_remove, argparse.Namespace())
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["removed"])
+        self.assertTrue(payload["warnings"])
+        self.assertIsNone(self.session.load()["active"])
+        self.assertEqual(self.session.load()["ownedOutputs"], ["HEADLESS-1"])
 
 
 if __name__ == "__main__":
