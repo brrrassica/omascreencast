@@ -819,7 +819,12 @@ def reconcile(
     state["ownedOutputs"] = owned
     if (result["cleaned"] or cleaned_orphans
             or result["active"] is None or owned_changed):
-        save(state)
+        try:
+            save(state)
+        except OSError as exc:
+            result["ok"] = False
+            result["error"] = f"failed to persist session state: {exc}"
+            result["saveFailed"] = True
     result["orphans"] = orphans
     result["cleanedOrphans"] = cleaned_orphans
     return result
@@ -1016,9 +1021,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
     try:
-        _emit(reconcile())
-        return 0
+        result = reconcile()
+        _emit(result)
+        return 0 if result.get("ok", True) else 1
     except SessionError as exc:
+        _emit({"ok": False, "error": str(exc), "cleaned": False, "orphans": []})
+        return 1
+    except OSError as exc:
         _emit({"ok": False, "error": str(exc), "cleaned": False, "orphans": []})
         return 1
 
@@ -1126,7 +1135,17 @@ def rearrange_active() -> dict:
     except (TypeError, ValueError):
         scale = 1.0
     apply_arrangement(name, mode, position, scale)
-    updated = update_active({"position": position}) or active
+    try:
+        updated = update_active({"position": position}) or active
+    except OSError as exc:
+        return {
+            "ok": False,
+            "error": f"applied arrangement but failed to persist session state: {exc}",
+            "active": active,
+            "rearranged": True,
+            "position": position,
+            "saveFailed": True,
+        }
     return {
         "ok": True,
         "active": updated,
@@ -1137,9 +1156,13 @@ def rearrange_active() -> dict:
 
 def cmd_rearrange(args: argparse.Namespace) -> int:
     try:
-        _emit(rearrange_active())
-        return 0
+        result = rearrange_active()
+        _emit(result)
+        return 0 if result.get("ok", True) else 1
     except SessionError as exc:
+        _emit({"ok": False, "error": str(exc)})
+        return 1
+    except OSError as exc:
         _emit({"ok": False, "error": str(exc)})
         return 1
 
