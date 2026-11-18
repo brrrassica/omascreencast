@@ -90,9 +90,13 @@ def provision() -> dict:
 
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        if not VENV_DIR.exists():
-            subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
         pip = VENV_DIR / "bin" / "pip"
+        if not VENV_DIR.exists() or not pip.exists():
+            subprocess.run(
+                [sys.executable, "-m", "venv", "--clear", str(VENV_DIR)],
+                check=True,
+            )
+            pip = VENV_DIR / "bin" / "pip"
         subprocess.run(
             [str(pip), "install", "--upgrade", "pychromecast", "zeroconf"],
             check=True,

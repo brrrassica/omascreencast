@@ -450,11 +450,16 @@ function overlappingDisplays(monitors) {
     var a = monitorLogicalSize(list[i])
     for (var j = i + 1; j < list.length; j++) {
       if (list[j].disabled === true) continue
+      var iName = String(list[i].name || "")
+      var jName = String(list[j].name || "")
+      var iMirror = String(list[i].mirrorOf || "")
+      var jMirror = String(list[j].mirrorOf || "")
+      if (iMirror === jName || jMirror === iName) continue
       var b = monitorLogicalSize(list[j])
       var ax = Number(list[i].x || 0), ay = Number(list[i].y || 0)
       var bx = Number(list[j].x || 0), by = Number(list[j].y || 0)
       if (ax < bx + b.width && bx < ax + a.width && ay < by + b.height && by < ay + a.height)
-        pairs.push([String(list[i].name || ""), String(list[j].name || "")])
+        pairs.push([iName, jName])
     }
   }
   return pairs
