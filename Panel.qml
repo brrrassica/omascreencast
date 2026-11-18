@@ -1229,14 +1229,14 @@ Panel {
                 ComboBox {
                   width: Style.space(168)
                   model: ["Auto", "English", "Bahasa Indonesia"]
-                  currentIndex: {
-                    var idx = ["auto", "en", "id"].indexOf(root.language)
-                    return idx < 0 ? 0 : idx
-                  }
+                  currentIndex: ["auto", "en", "id"].indexOf(root.language)
+                  displayText: currentIndex < 0 ? String(root.language) : currentText
                   font.family: root.fontFamily
-                  onActivated: root.persistSettings({
-                    language: ["auto", "en", "id"][currentIndex]
-                  })
+                  onActivated: {
+                    var codes = ["auto", "en", "id"]
+                    if (currentIndex >= 0 && currentIndex < codes.length)
+                      root.persistSettings({ language: codes[currentIndex] })
+                  }
                 }
               }
 
@@ -1283,12 +1283,13 @@ Panel {
 
                 ComboBox {
                   width: Style.space(168)
-                  model: ["1920x1080@60", "1600x900@60", "1280x720@60"]
-                  currentIndex: {
-                    var idx = ["1920x1080@60", "1600x900@60", "1280x720@60"]
-                      .indexOf(root.resolution)
-                    return idx < 0 ? 0 : idx
+                  property var choices: {
+                    var base = ["1920x1080@60", "1600x900@60", "1280x720@60"]
+                    return base.indexOf(root.resolution) < 0
+                      ? [root.resolution].concat(base) : base
                   }
+                  model: choices
+                  currentIndex: choices.indexOf(root.resolution)
                   font.family: root.fontFamily
                   onActivated: root.persistSettings({ resolution: currentText })
                 }
@@ -1307,11 +1308,13 @@ Panel {
 
                 ComboBox {
                   width: Style.space(82)
-                  model: ["24", "30", "50", "60"]
-                  currentIndex: {
-                    var idx = ["24", "30", "50", "60"].indexOf(String(root.fps))
-                    return idx < 0 ? 1 : idx
+                  property var choices: {
+                    var base = ["24", "30", "50", "60"]
+                    var cur = String(root.fps)
+                    return base.indexOf(cur) < 0 ? [cur].concat(base) : base
                   }
+                  model: choices
+                  currentIndex: choices.indexOf(String(root.fps))
                   font.family: root.fontFamily
                   onActivated: root.persistSettings({ fps: Number(currentText) })
                 }
@@ -1330,12 +1333,13 @@ Panel {
 
                 ComboBox {
                   width: Style.space(82)
-                  model: ["4", "6", "8", "10", "12", "16"]
-                  currentIndex: {
-                    var idx = ["4", "6", "8", "10", "12", "16"]
-                      .indexOf(String(root.bitrateMbps))
-                    return idx < 0 ? 1 : idx
+                  property var choices: {
+                    var base = ["4", "6", "8", "10", "12", "16"]
+                    var cur = String(root.bitrateMbps)
+                    return base.indexOf(cur) < 0 ? [cur].concat(base) : base
                   }
+                  model: choices
+                  currentIndex: choices.indexOf(String(root.bitrateMbps))
                   font.family: root.fontFamily
                   onActivated: root.persistSettings({
                     bitrateMbps: Number(currentText)
@@ -1410,11 +1414,16 @@ Panel {
                     Model.tr(root.uiLanguage, "drop_keep"),
                     Model.tr(root.uiLanguage, "drop_remove")
                   ]
-                  currentIndex: root.dropPolicy === "remove" ? 1 : 0
+                  currentIndex: root.dropPolicy === "remove" ? 1
+                    : (root.dropPolicy === "keep" ? 0 : -1)
+                  displayText: currentIndex < 0 ? String(root.dropPolicy) : currentText
                   font.family: root.fontFamily
-                  onActivated: root.persistSettings({
-                    dropPolicy: currentIndex === 1 ? "remove" : "keep"
-                  })
+                  onActivated: {
+                    if (currentIndex === 0)
+                      root.persistSettings({ dropPolicy: "keep" })
+                    else if (currentIndex === 1)
+                      root.persistSettings({ dropPolicy: "remove" })
+                  }
                 }
               }
             }
