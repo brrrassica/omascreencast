@@ -629,22 +629,29 @@ def rule_for_monitor(rules: list[dict], monitor: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 # Guard rails (M6): never let a layout hide every display
 # ---------------------------------------------------------------------------
-def load_monitors() -> list[dict]:
-    """Return ``hyprctl monitors all -j``; an unavailable compositor is empty."""
+def load_monitors() -> list[dict] | None:
+    """Return ``hyprctl monitors all -j``.
+
+    Returns ``None`` when the current monitor list cannot be queried (hyprctl
+    missing, failed, timed out, or returned unreadable data) so callers can
+    distinguish an unavailable compositor from a successful but empty result.
+    """
     try:
         result = subprocess.run(
             ["hyprctl", "monitors", "all", "-j"],
             capture_output=True, text=True, timeout=5,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return []
+        return None
     if result.returncode != 0:
-        return []
+        return None
     try:
         data = json.loads(result.stdout or "[]")
     except json.JSONDecodeError:
-        return []
-    return [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+        return None
+    if not isinstance(data, list):
+        return None
+    return [m for m in data if isinstance(m, dict)]
 
 
 def _layout_after(monitors: list[dict], fields: dict) -> list[dict]:
@@ -676,15 +683,41 @@ def _layout_after(monitors: list[dict], fields: dict) -> list[dict]:
     return layout
 
 
+def _is_mirror_enabled(value) -> bool:
+    """Return True when a rule field requests mirroring onto another output."""
+    if value is None:
+        return False
+    mirror = str(value).strip()
+    return mirror != "" and mirror.lower() != "none"
+
+
 def guard_visible_layout(fields: dict, monitors: list[dict] | None = None) -> None:
     """Refuse arrangements that leave no independently visible display (M6).
 
     Disabling the last display, or mirroring every remaining output onto a
     disabled one, would leave the user with no way back except a TTY. A rule for
     an output Hyprland does not know yet (e.g. a just-created HEADLESS output)
-    cannot hide an existing display, so it is allowed through.
+    cannot hide an existing display, so it is allowed through when the monitor
+    list itself is known. If the current monitors cannot be queried, dangerous
+    rules fail closed instead of guessing.
     """
-    known = load_monitors() if monitors is None else monitors
+    if monitors is None:
+        known = load_monitors()
+        if known is None:
+            if fields.get("disabled") is True:
+                raise ConfigError(
+                    "cannot verify display layout: current monitors are unavailable, "
+                    "refusing to disable a display"
+                )
+            if _is_mirror_enabled(fields.get("mirror")):
+                raise ConfigError(
+                    "cannot verify display layout: current monitors are unavailable, "
+                    "refusing a mirror arrangement that could hide every display"
+                )
+            return
+    else:
+        known = monitors
+
     if not known:
         return
     name = str(fields.get("output") or "")
@@ -723,7 +756,7 @@ def _write_target(path: Path) -> Path:
 def backup_config(path: Path) -> str:
     """Copy the current config aside with a UTC timestamp; return the backup path."""
     target = _write_target(path)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     backup = target.with_suffix(target.suffix + f".omascreencast-{stamp}.bak")
     shutil.copy2(target, backup)
     _prune_backups(target)
