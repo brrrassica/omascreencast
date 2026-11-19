@@ -648,6 +648,33 @@ class CreateLifecycleTest(_TempPaths):
         self.assertIsNone(self.session.load()["active"])
         self.assertEqual(self.session.load()["ownedOutputs"], [])
 
+    def test_create_rolls_back_when_state_save_raises(self):
+        self.session.CREATE_HEALTH_DELAY = 0
+        removed = []
+
+        self.session.list_monitors = lambda: [
+            {"name": "eDP-1", "focused": True, "x": 0, "y": 0,
+             "width": 1920, "height": 1080, "scale": 1},
+            {"name": "HEADLESS-1"},
+        ]
+        self.session.create_headless_output = lambda name: ("HEADLESS-1", [])
+        self.session.apply_arrangement = lambda *a, **k: None
+        self.session.spawn_stream = lambda cmd: 4242
+        self.session.pid_alive = lambda pid: True
+        self.session.remove_output = removed.append
+        self.session.stop_process = lambda pid, timeout=0: True
+
+        def fail_save(_state):
+            raise OSError("disk full")
+
+        self.session.save = fail_save
+
+        payload = self.emit_command(self.session.cmd_create, self._args())
+        self.assertFalse(payload["ok"])
+        self.assertIn("disk full", payload["error"])
+        self.assertEqual(removed, ["HEADLESS-1"])
+        self.assertIsNone(self.session.load()["active"])
+
     def test_duplicate_running_session_is_rejected(self):
         self.session.save({"version": 1, "active": {
             "name": "HEADLESS-1", "pid": 9, "phase": "casting",
@@ -778,6 +805,20 @@ class RemoveTest(_TempPaths):
         self.assertTrue(payload["warnings"])
         self.assertIsNone(self.session.load()["active"])
         self.assertEqual(self.session.load()["ownedOutputs"], ["HEADLESS-1"])
+
+    def test_remove_keeps_record_when_engine_pid_survives(self):
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "pid": 321, "phase": "casting",
+        }})
+        self.session.stop_process = lambda pid, timeout=0: False
+        payload = self.emit_command(self.session.cmd_remove, argparse.Namespace())
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["removed"])
+        self.assertIn("did not exit", payload["error"])
+        active = self.session.load()["active"]
+        self.assertIsNotNone(active)
+        self.assertEqual(active["pid"], 321)
+        self.assertEqual(active["phase"], "stopped")
 
 
 if __name__ == "__main__":

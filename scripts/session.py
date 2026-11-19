@@ -945,7 +945,9 @@ def _create(args: argparse.Namespace) -> int:
 
         _emit({"ok": True, "active": active})
         return 0
-    except SessionError:
+    except (SessionError, OSError) as exc:
+        # `_save_unlocked` raises raw OSError (disk full, unwritable state dir),
+        # so state-write failures must unwind the same side effects.
         if pid:
             stop_process(pid, timeout=3.0)
         if created_name:
@@ -953,14 +955,18 @@ def _create(args: argparse.Namespace) -> int:
                 remove_output(created_name)
             except SessionError:
                 pass
-        clear_active(remove_owned=created_name)
+        try:
+            clear_active(remove_owned=created_name)
+        except OSError:
+            # Rollback is best effort; surface the original failure below.
+            pass
         raise
 
 
 def cmd_create(args: argparse.Namespace) -> int:
     try:
         return _create(args)
-    except SessionError as exc:
+    except (SessionError, OSError) as exc:
         _emit({"ok": False, "error": str(exc)})
         return 1
 
@@ -979,6 +985,20 @@ def cmd_remove(args: argparse.Namespace) -> int:
 
     if pid and not stop_process(pid):
         warnings.append(f"stream pid {pid} did not exit")
+        # The engine may still be running: keep the record (pid intact) so the
+        # panel and `reconcile` can retry, mirroring how a failed output
+        # removal keeps its name in the owned registry below. Never clear the
+        # sole pointer to a live engine.
+        try:
+            active = update_active({"phase": "stopped"}) or active
+        except OSError:
+            pass  # keep the on-disk record as-is rather than crashing
+        payload: dict = {"ok": False, "active": active, "removed": False,
+                         "name": name, "error": f"stream pid {pid} did not exit"}
+        if warnings:
+            payload["warnings"] = warnings
+        _emit(payload)
+        return 1
 
     if name:
         try:
