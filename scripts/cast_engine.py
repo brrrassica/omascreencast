@@ -1154,7 +1154,14 @@ def _apply_cached_codecs(devices: list[Device], cache: dict) -> None:
 
 def probe_codecs(host: str, timeout: float = EUREKA_TIMEOUT) -> list[str]:
     """Best-effort codec probe via the Cast ``eureka_info`` endpoint (R3)."""
-    url = f"http://{host}:8008/setup/eureka_info?options=detail"
+    host_str = str(host or "").strip()
+    if host_str.startswith("[") and host_str.endswith("]"):
+        authority = host_str
+    elif ":" in host_str:
+        authority = f"[{host_str}]"
+    else:
+        authority = host_str
+    url = f"http://{authority}:8008/setup/eureka_info?options=detail"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             info = json.loads(resp.read().decode("utf-8", "replace"))
