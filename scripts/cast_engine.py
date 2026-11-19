@@ -1617,6 +1617,15 @@ def cmd_stream(args: argparse.Namespace) -> int:
                 emit({"type": "phase", "phase": "error", "detail": "capture/encode exited"})
                 break
             time.sleep(0.5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        # A missing capture tool or ffmpeg must surface as an error phase
+        # (the QML side keys on it); otherwise the finally below would emit a
+        # misleading idle/"stopped" for a stream that never started.
+        terminal_phase = "error"
+        emit({
+            "type": "phase", "phase": "error",
+            "detail": f"could not start capture pipeline: {exc}",
+        })
     finally:
         if mc is not None and 'listener' in locals():
             try:
