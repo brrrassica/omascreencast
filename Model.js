@@ -689,6 +689,7 @@ function barState(state) {
     var phase = String(session.phase || "")
     if (phase === "casting") return "casting"
     if (phase === "starting") return "connecting"
+    if (phase === "disconnected") return "disconnected"
   }
   if (s.sessionBusy === true) return "connecting"
   if (s.discovering === true) return "discovering"
