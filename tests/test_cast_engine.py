@@ -402,5 +402,39 @@ class CastFromHostTest(unittest.TestCase):
                 self.cast._cast_from_host("10.0.0.9", self.cast.logging.getLogger("t"))
 
 
+class MainSpawnFailureTest(unittest.TestCase):
+    def setUp(self):
+        self.cast = _load()
+
+    def test_spawn_failure_emits_error_phase(self):
+        emitted = []
+
+        def _explode(args):
+            raise FileNotFoundError(2, "No such file or directory: 'wl-screenrec'")
+
+        fake_args = mock.Mock(command="stream")
+        with mock.patch.object(self.cast, "parse_args", return_value=fake_args), \
+                mock.patch.object(self.cast, "cmd_stream", side_effect=_explode), \
+                mock.patch.object(self.cast, "emit", side_effect=emitted.append):
+            code = self.cast.main()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(emitted), 1)
+        event = emitted[0]
+        self.assertEqual(event["type"], "phase")
+        self.assertEqual(event["phase"], "error")
+        self.assertIn("stream failed", event["detail"])
+        self.assertIn("wl-screenrec", event["detail"])
+
+    def test_success_path_is_not_wrapped(self):
+        fake_args = mock.Mock(command="stop")
+        with mock.patch.object(self.cast, "parse_args", return_value=fake_args), \
+                mock.patch.object(self.cast, "cmd_stop", return_value=0) as stop, \
+                mock.patch.object(self.cast, "emit") as emit:
+            code = self.cast.main()
+        self.assertEqual(code, 0)
+        stop.assert_called_once_with(fake_args)
+        emit.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
