@@ -894,7 +894,7 @@ class _ReceiverDropListener:
         self._drop("receiver load failed")
 
 
-def _teardown(cap, ff, srv, mc, run_dir: Path, log: logging.Logger,
+def _teardown(cap, ff, srv, mc, run_dir: Path | None, log: logging.Logger,
               browser=None) -> None:
     if mc is not None:
         try:
@@ -923,7 +923,8 @@ def _teardown(cap, ff, srv, mc, run_dir: Path, log: logging.Logger,
             srv.server_close()
         except Exception:  # noqa: BLE001
             pass
-    shutil.rmtree(run_dir, ignore_errors=True)
+    if run_dir is not None:
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1482,31 +1483,34 @@ def cmd_stream(args: argparse.Namespace) -> int:
     ip = lan_ip()
     url = f"http://{ip}:{args.port}/stream.m3u8"
     handler = make_handler(buf, log)
-    try:
-        srv = http.server.ThreadingHTTPServer((ip, args.port), handler)
-    except OSError as exc:
-        log.error("cannot bind %s:%s: %s", ip, args.port, exc)
-        emit({
-            "type": "phase", "phase": "error",
-            "detail": f"cannot bind {ip}:{args.port}: {exc}",
-        })
-        session_state.mark_stopped()
-        return 1
-    srv.daemon_threads = True
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log.info("serving %s", url)
-
-    # Capture -> encode. The capture tool encodes; ffmpeg remuxes to fragmented
-    # MP4. The FIFO is a pipe (not a buffer); segments themselves stay in RAM.
-    run_dir = Path(tempfile.mkdtemp(prefix="omascreencast-"))
-    fifo = run_dir / "capture.stream"
-    os.mkfifo(fifo)
-
+    srv = None
+    run_dir = None
     cap = ff = None
     mc = None
     browser = None
     terminal_phase = ""
     try:
+        try:
+            srv = http.server.ThreadingHTTPServer((ip, args.port), handler)
+        except OSError as exc:
+            log.error("cannot bind %s:%s: %s", ip, args.port, exc)
+            emit({
+                "type": "phase", "phase": "error",
+                "detail": f"cannot bind {ip}:{args.port}: {exc}",
+            })
+            terminal_phase = "error"
+            return 1
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        log.info("serving %s", url)
+
+        # Capture -> encode. The capture tool encodes; ffmpeg remuxes to
+        # fragmented MP4. The FIFO is a pipe (not a buffer); segments
+        # themselves stay in RAM.
+        run_dir = Path(tempfile.mkdtemp(prefix="omascreencast-"))
+        fifo = run_dir / "capture.stream"
+        os.mkfifo(fifo)
+
         cap = subprocess.Popen(
             capture_command(
                 backend, args.output, args.fps, codec, render_node,

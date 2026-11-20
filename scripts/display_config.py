@@ -1024,10 +1024,35 @@ def cmd_save(args: argparse.Namespace) -> int:
         # selector (desc:... when a description is supplied).
         runtime = dict(fields)
         runtime["output"] = name
-        guard_visible_layout(runtime)
-        applied = apply_rule(runtime)
         monitor = {"name": name, "description": str(rule.get("description") or "")}
-        persisted = save_rule(path, monitor, fields)
+        guard_visible_layout(runtime)
+        # Snapshot the on-disk rule before applying so a persistence failure
+        # below can roll the live arrangement back to what the config still
+        # describes (#81). Best effort: an unreadable config just skips rollback.
+        try:
+            previous = rule_for_monitor(parse_rules(read_config(path)), monitor)
+        except (ConfigError, OSError):
+            previous = None
+        applied = apply_rule(runtime)
+        try:
+            persisted = save_rule(path, monitor, fields)
+        except (ConfigError, OSError) as exc:
+            if applied.get("ok"):
+                # The runtime arrangement is already live, but persistence
+                # failed: re-apply the prior on-disk arrangement so the display
+                # never diverges from the config the command reports as
+                # unchanged (#81).
+                if previous is not None and previous.get("fields"):
+                    rollback = dict(previous["fields"])
+                    rollback["output"] = name
+                    try:
+                        apply_rule(rollback)
+                    except (ConfigError, OSError) as rollback_exc:
+                        raise ConfigError(
+                            f"{exc} (rollback of the applied arrangement"
+                            f" failed: {rollback_exc})"
+                        ) from exc
+            raise
         _emit({
             "ok": True,
             "output": name,
