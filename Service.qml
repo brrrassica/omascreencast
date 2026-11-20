@@ -334,11 +334,14 @@ Item {
     reconcileProc.running = true
   }
 
+  // Returns true when the connect attempt actually started; false when refused
+  // by an early-return guard (no device, busy, or an active session). The IPC
+  // start handler relies on this to report failure instead of a false success.
   function connectDevice(device, options, retry) {
-    if (!device || sessionBusy) return
+    if (!device || sessionBusy) return false
     if (casting) {
       lastError = "Disconnect the active session first"
-      return
+      return false
     }
     reconnectTimer.stop()
     var retrying = retry === true
@@ -364,10 +367,14 @@ Item {
     sessionBusy = true
     createProc.command = cmd
     createProc.running = true
+    return true
   }
 
+  // Returns true when teardown actually started; false when refused because a
+  // session is already being created/removed or none is active. The IPC stop
+  // handler relies on this so a refused stop does not set userInitiatedStop.
   function disconnect() {
-    if (sessionBusy || activeSession === null) return
+    if (sessionBusy || activeSession === null) return false
     reconnectTimer.stop()
     pendingReconnectDevice = null
     handlingDrop = false
@@ -377,6 +384,7 @@ Item {
     sessionBusy = true
     removeProc.command = [pythonPath, sessionScript, "remove"]
     removeProc.running = true
+    return true
   }
 
   // M6: an unexpected receiver/network drop. Keep or remove the virtual output
@@ -789,6 +797,7 @@ Item {
           root.activeSession = r.active
           root.eventPhase = "starting"
           root.lastError = ""
+          root.userInitiatedStop = false
           root.startEvents()
         } else {
           root.lastError = r.error !== "" ? r.error : "Could not create the virtual monitor"
@@ -1132,7 +1141,9 @@ Item {
         if (payload.fps) opts.fps = payload.fps
         if (payload.bitrate) opts.bitrate = payload.bitrate
         if (payload.codec) opts.codec = payload.codec
-        root.connectDevice(device, opts)
+        if (!root.connectDevice(device, opts)) {
+          return JSON.stringify({ ok: false, error: root.lastError || "connect refused" })
+        }
         return JSON.stringify({ ok: true, state: "connecting" })
       } catch (e) {
         return JSON.stringify({ ok: false, error: String(e) })
@@ -1140,8 +1151,13 @@ Item {
     }
 
     function stop(): string {
-      root.userInitiatedStop = true
-      root.disconnect()
+      if (!root.disconnect()) {
+        var busy = root.sessionBusy
+        return JSON.stringify({
+          ok: false,
+          error: busy ? "session busy" : "no active session"
+        })
+      }
       return JSON.stringify({ ok: true, state: "stopping" })
     }
 
