@@ -1712,7 +1712,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     handlers = {"discovery": cmd_discovery, "stream": cmd_stream, "stop": cmd_stop}
-    return handlers[args.command](args)
+    try:
+        return handlers[args.command](args)
+    except (OSError, subprocess.SubprocessError) as exc:
+        # Any exception escaping a cmd_* handler (e.g. a capture-tool or
+        # ffmpeg spawn failure in cmd_stream) must surface as a machine
+        # readable phase event, not a raw traceback: the panel keys on
+        # `phase: "error"` and `session.py events` follows this stdout.
+        emit({"type": "phase", "phase": "error",
+              "detail": f"{args.command} failed: {exc}"})
+        return 1
 
 
 if __name__ == "__main__":

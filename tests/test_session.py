@@ -449,6 +449,55 @@ class ReconcileTest(_TempPaths):
         )
         self.assertEqual(result["orphans"], ["HEADLESS-2"])
 
+    def test_keeps_record_when_engine_pid_survives_stop(self):
+        self._active()
+        stopped, removed = [], []
+
+        def _refuse(_pid):
+            stopped.append(_pid)
+            return False
+
+        result = self.session.reconcile(
+            monitors=[{"name": "eDP-1"}],  # output missing
+            alive=lambda _pid: True,
+            engine=lambda _pid: True,
+            stop=_refuse,
+            remove=removed.append,
+        )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["cleaned"])
+        self.assertIn("output missing", result["reasons"])
+        self.assertIn("did not exit", result["error"])
+        self.assertTrue(result["warnings"])
+        kept = result["active"]
+        self.assertIsNotNone(kept)
+        self.assertEqual(kept["pid"], 123)
+        self.assertEqual(kept["phase"], "stopped")
+        # The record must survive on disk so remove/reconcile can retry.
+        self.assertEqual(self.session.load()["active"]["pid"], 123)
+        self.assertEqual(stopped, [123])
+        # Output already missing: nothing left to remove, engine is the blocker.
+        self.assertEqual(removed, [])
+
+    def test_retry_after_failed_stop_cleans_when_engine_gone(self):
+        self.session.save({"version": 1, "active": {
+            "name": "HEADLESS-1", "pid": 123, "phase": "stopped",
+        }})
+        stopped, removed = [], []
+        result = self.session.reconcile(
+            monitors=[{"name": "eDP-1"}],
+            alive=lambda _pid: True,
+            engine=lambda _pid: True,
+            stop=lambda _pid: stopped.append(_pid) or True,
+            remove=removed.append,
+        )
+        self.assertTrue(result["cleaned"])
+        self.assertIn("cleanup incomplete", result["reasons"])
+        self.assertIsNone(result["active"])
+        self.assertIsNone(self.session.load()["active"])
+        self.assertEqual(stopped, [123])
+        self.assertEqual(removed, [])
+
 
 class SignalTreeTest(_TempPaths):
     def test_group_leader_signals_its_process_group(self):

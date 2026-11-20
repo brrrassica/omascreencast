@@ -750,8 +750,10 @@ def reconcile(
         "cleanedOrphans": [],
     }
 
+    active_updated = False
     if isinstance(active, dict) and active:
         reasons: list[str] = []
+        warnings: list[str] = []
         name = str(active.get("name") or "")
         pid = active.get("pid")
         pid_ours = bool(pid) and alive(pid) and engine(pid)
@@ -764,24 +766,52 @@ def reconcile(
             reasons.append("stream not started")
         if phase == "stopped" and not pid:
             reasons.append("cast stopped")
+        if phase == "stopped" and pid and pid_ours:
+            # A previous stop/remove could not finish (the engine survived
+            # SIGKILL or the output removal failed): retry the cleanup.
+            reasons.append("cleanup incomplete")
 
         if reasons:
-            removed = True
+            stopped = True
             if pid_ours:
-                stop(pid)
+                stopped = bool(stop(pid))
+                if not stopped:
+                    warnings.append(f"stream pid {pid} did not exit")
+            output_missing = bool(name) and name not in names
+            removed = True
             if name and name in names:
                 try:
                     remove(name)
-                except SessionError:
+                except SessionError as exc:
                     removed = False
+                    warnings.append(str(exc))
             if name and removed:
                 owned = [item for item in owned if item != name]
                 # The output is gone; keep the later orphan scan from treating
                 # the pre-cleanup monitor snapshot as still-existing output.
                 names.discard(name)
-            state["active"] = None
-            result["cleaned"] = True
-            result["reasons"] = reasons
+            # Only drop the record when the engine is gone and the output is
+            # either missing or was removed; otherwise keep a reduced record
+            # so `remove`/`reconcile` can retry. Never destroy the sole
+            # pointer to a possibly-live engine (mirrors `cmd_remove`).
+            if stopped and (output_missing or removed):
+                state["active"] = None
+                result["cleaned"] = True
+                result["reasons"] = reasons
+                if warnings:
+                    result["warnings"] = warnings
+            else:
+                kept = dict(active)
+                kept["phase"] = "stopped"
+                state["active"] = kept
+                active_updated = True
+                result["active"] = kept
+                result["reasons"] = reasons
+                if warnings:
+                    result["warnings"] = warnings
+                if not stopped:
+                    result["ok"] = False
+                    result["error"] = f"stream pid {pid} did not exit"
         else:
             result["active"] = active
 
@@ -817,7 +847,7 @@ def reconcile(
 
     owned_changed = state.get("ownedOutputs") != owned
     state["ownedOutputs"] = owned
-    if (result["cleaned"] or cleaned_orphans
+    if (result["cleaned"] or active_updated or cleaned_orphans
             or result["active"] is None or owned_changed):
         try:
             save(state)
