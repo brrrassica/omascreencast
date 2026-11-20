@@ -131,6 +131,7 @@ Panel {
     if (barState === "casting") return "󰐊"
     if (barState === "connecting") return "󰒍"
     if (barState === "discovering") return "󰑐"
+    if (barState === "disconnected") return "󰤭"
     if (devices.length > 0) return "󰍺"
     return "󰍹"
   }
@@ -145,6 +146,7 @@ Panel {
     }
     if (barState === "connecting") return Model.tr(uiLanguage, "connecting").toUpperCase()
     if (barState === "discovering") return Model.tr(uiLanguage, "searching").toUpperCase()
+    if (barState === "disconnected") return Model.tr(uiLanguage, "disconnected").toUpperCase()
     var parts = []
     parts.push(monitors.length + " " + Model.tr(uiLanguage, "displays"))
     parts.push(devices.length + " " + Model.tr(uiLanguage, "devices"))
@@ -410,7 +412,8 @@ Panel {
         if (root.focusSection !== "devices" || !root.service) return
         var device = root.devices[root.selectedIndex]
         if (!device) return
-        if (root.isActiveDevice(device)) root.requestDisconnect(device)
+        if (root.isActiveDevice(device) && root.disconnected) root.reconnectActive()
+        else if (root.isActiveDevice(device)) root.requestDisconnect(device)
         else root.service.connectDevice(device, root.connectOptions())
       }
       onCloseRequested: root.close()
