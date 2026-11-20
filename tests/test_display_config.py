@@ -8,11 +8,13 @@ Run with:  python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import importlib.util
+import argparse
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -476,6 +478,69 @@ class SaveRuleTest(unittest.TestCase):
         with self.assertRaises(self.dc.ConfigError):
             self.dc.restore_config(self.path)
         self.assertEqual(self.path.read_text(), "-- current\n")
+
+
+class CmdSaveRollbackTest(unittest.TestCase):
+    """Persistence failure must roll back the already-applied runtime (#81)."""
+
+    def setUp(self):
+        self.dc = _load()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "monitors.lua"
+        self.addCleanup(self._tmp.cleanup)
+        self.path.write_text(SOURCE, encoding="utf-8")
+        self.applies = []
+
+        def fake_apply(fields):
+            self.applies.append(dict(fields))
+            return {"ok": True, "rule": "hl.monitor({...})", "result": "ok"}
+
+        self.dc.apply_rule = fake_apply
+
+    def _save_with_failing_persistence(self):
+        args = argparse.Namespace(
+            config=str(self.path),
+            rule='{"name": "HDMI-A-1", "mode": "2560x1440@60"}',
+        )
+        with mock.patch.object(self.dc, "save_rule",
+                               side_effect=self.dc.ConfigError("atomic write failed")):
+            code = self.dc.cmd_save(args)
+        self.assertEqual(code, 1)
+        return self.applies
+
+    def test_persistence_failure_reapplies_previous_rule(self):
+        applies = self._save_with_failing_persistence()
+        self.assertEqual(len(applies), 2, applies)
+        self.assertEqual(applies[0]["output"], "HDMI-A-1")
+        self.assertEqual(applies[0]["mode"], "2560x1440@60")
+        # The rollback re-applies the rule still on disk.
+        self.assertEqual(applies[1]["output"], "HDMI-A-1")
+        self.assertEqual(applies[1]["mode"], "preferred")
+        self.assertEqual(applies[1]["position"], "0x0")
+        self.assertEqual(self.path.read_text(), SOURCE)
+
+    def test_persistence_failure_without_previous_rule_skips_rollback(self):
+        args = argparse.Namespace(
+            config=str(self.path),
+            rule='{"name": "HEADLESS-9", "position": "3840x0"}',
+        )
+        with mock.patch.object(self.dc, "save_rule",
+                               side_effect=self.dc.ConfigError("disk full")):
+            code = self.dc.cmd_save(args)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.applies), 1)
+
+    def test_failure_before_apply_does_not_rollback(self):
+        args = argparse.Namespace(
+            config=str(self.path),
+            rule='{"name": "eDP-1", "disabled": true}',
+        )
+        with mock.patch.object(self.dc, "save_rule",
+                               side_effect=self.dc.ConfigError("disk full")):
+            code = self.dc.cmd_save(args)
+        self.assertEqual(code, 1)
+        # guard_visible_layout refuses the rule, so nothing was ever applied.
+        self.assertEqual(self.applies, [])
 
 
 if __name__ == "__main__":
