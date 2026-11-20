@@ -445,9 +445,27 @@ def read_box(stream) -> tuple[bytes | None, bytes | None]:
     return typ, hdr + stream.read(size - 8)
 
 
+def _debug_dump(path: Path, data: bytes, log: logging.Logger,
+                state: dict[str, bool]) -> None:
+    """Write a debug dump, disabling further dumps on the first OSError.
+
+    A failed dump must never take down the segmenter thread: ffmpeg would
+    block on its unread stdout pipe and the cast would freeze while still
+    reporting "casting" (M3 [#87]).
+    """
+    if not state.get("ok", True):
+        return
+    try:
+        path.write_bytes(data)
+    except OSError as exc:
+        state["ok"] = False
+        log.warning("debug dump disabled (%s): %s", path.name, exc)
+
+
 def segmenter(proc: subprocess.Popen, buf: HlsBuffer, log: logging.Logger,
               debug_dir: Path | None = None) -> None:
     """Parse fragmented MP4 from ffmpeg's stdout into the in-memory buffer."""
+    debug_state = {"ok": True}
     init = b""
     while True:
         typ, box = read_box(proc.stdout)
@@ -461,7 +479,7 @@ def segmenter(proc: subprocess.Popen, buf: HlsBuffer, log: logging.Logger,
             break
     buf.set_init(init)
     if debug_dir is not None:
-        (debug_dir / "init.mp4").write_bytes(init)
+        _debug_dump(debug_dir / "init.mp4", init, log, debug_state)
     log.info("init segment ready (%dB)", len(init))
 
     cur: list[int] = []
@@ -477,7 +495,7 @@ def segmenter(proc: subprocess.Popen, buf: HlsBuffer, log: logging.Logger,
         data = box + mdat
         idx = buf.add_part(data)
         if debug_dir is not None:
-            (debug_dir / f"part{idx}.m4s").write_bytes(data)
+            _debug_dump(debug_dir / f"part{idx}.m4s", data, log, debug_state)
         cur.append(idx)
         if len(cur) == buf.seg_parts:
             # Snapshot under the buffer lock: the HTTP threads must never see a
@@ -485,7 +503,8 @@ def segmenter(proc: subprocess.Popen, buf: HlsBuffer, log: logging.Logger,
             seg_data = buf.get_parts(cur)
             seg_idx = buf.add_segment(seg_data, cur)
             if debug_dir is not None:
-                (debug_dir / f"seg{seg_idx}.m4s").write_bytes(seg_data)
+                _debug_dump(debug_dir / f"seg{seg_idx}.m4s", seg_data, log,
+                            debug_state)
             log.debug("segment %d ready (%dB)", seg_idx, len(seg_data))
             cur = []
 
@@ -1473,9 +1492,6 @@ def cmd_stream(args: argparse.Namespace) -> int:
     )
 
     debug_dir = None
-    if args.debug:
-        debug_dir = DEBUG_DIR
-        debug_dir.mkdir(parents=True, exist_ok=True)
 
     # The stream URL must point at this machine, so resolve the local LAN
     # address first and bind the HTTP server to exactly that interface rather
@@ -1503,6 +1519,15 @@ def cmd_stream(args: argparse.Namespace) -> int:
         srv.daemon_threads = True
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         log.info("serving %s", url)
+
+        # Debug dumps are opt-in and best-effort, but creating their directory
+        # is fallible (ENOSPC/EACCES). It must happen inside the guarded
+        # region so a failure unwinds via the finally below (server shutdown,
+        # mark_stopped) instead of leaking the bound socket and leaving the
+        # session stuck in "starting" (#80).
+        if args.debug:
+            debug_dir = DEBUG_DIR
+            debug_dir.mkdir(parents=True, exist_ok=True)
 
         # Capture -> encode. The capture tool encodes; ffmpeg remuxes to
         # fragmented MP4. The FIFO is a pipe (not a buffer); segments
