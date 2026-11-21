@@ -177,14 +177,32 @@ Panel {
   }
 
   // --- cursor model (keyboard + mouse share one highlight) ---------------
-  // The arranger is pointer-driven; keyboard navigation covers receivers.
-  readonly property var visibleSections: ["devices"]
+  // The arranger is pointer-driven; keyboard navigation covers receivers, the
+  // pending disconnect confirmation, and the layout-trial Keep/Revert actions.
+  readonly property var visibleSections: {
+    var sections = []
+    if (confirmDisconnect) sections.push("confirm")
+    if (trialActive) sections.push("trial")
+    sections.push("devices")
+    return sections
+  }
 
   property string focusSection: "devices"
   property int selectedIndex: 0
   property bool cursorActive: false
 
+  readonly property bool confirmDisconnectSelected:
+    cursorActive && focusSection === "confirm" && selectedIndex === 0
+  readonly property bool cancelDisconnectSelected:
+    cursorActive && focusSection === "confirm" && selectedIndex === 1
+  readonly property bool trialKeepSelected:
+    cursorActive && focusSection === "trial" && selectedIndex === 0
+  readonly property bool trialRevertSelected:
+    cursorActive && focusSection === "trial" && selectedIndex === 1
+
   function sectionCount(section) {
+    if (section === "confirm") return 2
+    if (section === "trial") return 2
     if (section === "devices") return devices.length
     return 0
   }
@@ -409,14 +427,33 @@ Panel {
       }
       onActivateRequested: {
         if (!root.cursorActive) return
+        if (root.focusSection === "confirm") {
+          if (!root.confirmDisconnect) return
+          if (root.selectedIndex === 0) root.confirmDisconnectNow()
+          else if (root.selectedIndex === 1) root.cancelDisconnect()
+          return
+        }
+        if (root.focusSection === "trial") {
+          if (!root.service || !root.trialActive) return
+          if (root.selectedIndex === 0) root.service.keepDisplayTrial()
+          else if (root.selectedIndex === 1) root.service.revertDisplayTrial()
+          return
+        }
         if (root.focusSection !== "devices" || !root.service) return
         var device = root.devices[root.selectedIndex]
         if (!device) return
         if (root.isActiveDevice(device) && root.disconnected) root.reconnectActive()
+        else if (root.confirmDisconnect && root.isActiveDevice(device))
+          root.confirmDisconnectNow()
         else if (root.isActiveDevice(device)) root.requestDisconnect(device)
         else root.service.connectDevice(device, root.connectOptions())
       }
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        // Escape while a disconnect is pending cancels the confirmation
+        // instead of closing the whole panel.
+        if (root.confirmDisconnect) root.cancelDisconnect()
+        else root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
       ScrollView {
@@ -593,20 +630,44 @@ Panel {
                 text: Model.tr(root.uiLanguage, "disconnect")
                 iconText: "󰓛"
                 bordered: true
-                foreground: root.foreground
+                foreground: root.confirmDisconnectSelected
+                  ? Commons.Color.accent : root.foreground
                 fontFamily: root.fontFamily
                 horizontalPadding: Style.space(4)
                 verticalPadding: Style.space(6)
                 onClicked: root.confirmDisconnectNow()
+
+                MouseArea {
+                  anchors.fill: parent
+                  acceptedButtons: Qt.NoButton
+                  hoverEnabled: true
+                  onContainsMouseChanged: if (containsMouse) {
+                    root.cursorActive = true
+                    root.focusSection = "confirm"
+                    root.selectedIndex = 0
+                  }
+                }
               }
 
               Button {
                 text: "Cancel"
-                foreground: root.foreground
+                foreground: root.cancelDisconnectSelected
+                  ? Commons.Color.accent : root.foreground
                 fontFamily: root.fontFamily
                 horizontalPadding: Style.space(4)
                 verticalPadding: Style.space(6)
                 onClicked: root.cancelDisconnect()
+
+                MouseArea {
+                  anchors.fill: parent
+                  acceptedButtons: Qt.NoButton
+                  hoverEnabled: true
+                  onContainsMouseChanged: if (containsMouse) {
+                    root.cursorActive = true
+                    root.focusSection = "confirm"
+                    root.selectedIndex = 1
+                  }
+                }
               }
             }
           }
@@ -708,21 +769,45 @@ Panel {
                   text: Model.tr(root.uiLanguage, "keep_layout")
                   iconText: "󰄬"
                   bordered: true
-                  foreground: root.foreground
+                  foreground: root.trialKeepSelected
+                    ? Commons.Color.accent : root.foreground
                   fontFamily: root.fontFamily
                   horizontalPadding: Style.space(4)
                   verticalPadding: Style.space(6)
                   onClicked: if (root.service) root.service.keepDisplayTrial()
+
+                  MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.NoButton
+                    hoverEnabled: true
+                    onContainsMouseChanged: if (containsMouse) {
+                      root.cursorActive = true
+                      root.focusSection = "trial"
+                      root.selectedIndex = 0
+                    }
+                  }
                 }
 
                 Button {
                   text: Model.tr(root.uiLanguage, "revert_layout")
                   iconText: "󰁮"
-                  foreground: root.foreground
+                  foreground: root.trialRevertSelected
+                    ? Commons.Color.accent : root.foreground
                   fontFamily: root.fontFamily
                   horizontalPadding: Style.space(4)
                   verticalPadding: Style.space(6)
                   onClicked: if (root.service) root.service.revertDisplayTrial()
+
+                  MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.NoButton
+                    hoverEnabled: true
+                    onContainsMouseChanged: if (containsMouse) {
+                      root.cursorActive = true
+                      root.focusSection = "trial"
+                      root.selectedIndex = 1
+                    }
+                  }
                 }
               }
             }
