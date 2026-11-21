@@ -163,8 +163,9 @@ Panel {
   }
 
   function confirmDisconnectNow() {
+    // A refused stop (busy / no session) must not silently dismiss the prompt.
+    if (root.service && !root.service.disconnect()) return
     root.confirmDisconnect = false
-    if (root.service) root.service.disconnect()
   }
 
   function cancelDisconnect() {
@@ -427,26 +428,26 @@ Panel {
       }
       onActivateRequested: {
         if (!root.cursorActive) return
-        if (root.focusSection === "confirm") {
-          if (!root.confirmDisconnect) return
-          if (root.selectedIndex === 0) root.confirmDisconnectNow()
-          else if (root.selectedIndex === 1) root.cancelDisconnect()
-          return
-        }
-        if (root.focusSection === "trial") {
-          if (!root.service || !root.trialActive) return
-          if (root.selectedIndex === 0) root.service.keepDisplayTrial()
-          else if (root.selectedIndex === 1) root.service.revertDisplayTrial()
-          return
-        }
-        if (root.focusSection !== "devices" || !root.service) return
         var device = root.devices[root.selectedIndex]
-        if (!device) return
-        if (root.isActiveDevice(device) && root.disconnected) root.reconnectActive()
-        else if (root.confirmDisconnect && root.isActiveDevice(device))
-          root.confirmDisconnectNow()
-        else if (root.isActiveDevice(device)) root.requestDisconnect(device)
-        else root.service.connectDevice(device, root.connectOptions())
+        var decision = Model.keyboardActivation({
+          focusSection: root.focusSection,
+          selectedIndex: root.selectedIndex,
+          confirmDisconnect: root.confirmDisconnect,
+          trialActive: root.trialActive,
+          hasService: !!root.service,
+          device: device || null,
+          active: device ? root.isActiveDevice(device) : false,
+          disconnected: root.disconnected
+        })
+        switch (decision.action) {
+        case "confirm": root.confirmDisconnectNow(); break
+        case "cancel": root.cancelDisconnect(); break
+        case "keepTrial": root.service.keepDisplayTrial(); break
+        case "revertTrial": root.service.revertDisplayTrial(); break
+        case "reconnect": root.reconnectActive(); break
+        case "requestDisconnect": root.requestDisconnect(decision.device); break
+        case "connect": root.service.connectDevice(decision.device, root.connectOptions()); break
+        }
       }
       onCloseRequested: {
         // Escape while a disconnect is pending cancels the confirmation

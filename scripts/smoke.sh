@@ -4,9 +4,10 @@
 # Runs every check that does not need a Chromecast or a graphical session:
 #   1. manifest sanity (JSON + required fields)
 #   2. Python unit tests
-#   3. headless capture/encode/packager/HTTP smoke (real ffmpeg, synthetic source)
-#   4. `omarchy plugin validate`           (skipped when omarchy is absent)
-#   5. `qmllint`                            (skipped when qmllint is absent)
+#   3. keyboard-activation model tests     (skipped when node is absent)
+#   4. headless capture/encode/packager/HTTP smoke (real ffmpeg, synthetic source)
+#   5. `omarchy plugin validate`           (skipped when omarchy is absent)
+#   6. `qmllint`                            (skipped when qmllint is absent)
 #
 # Usage: ./scripts/smoke.sh [--strict]
 #   --strict  treat skipped checks (missing omarchy/qmllint) as failures
@@ -49,6 +50,13 @@ PY
 
 step "python unit tests"
 python3 -m unittest discover -s tests -v
+
+step "keyboard activation model"
+if command -v node >/dev/null 2>&1; then
+  node --test tests/test_model_keyboard.mjs
+else
+  skip "node not installed"
+fi
 
 step "headless pipeline smoke"
 python3 tests/headless_smoke.py

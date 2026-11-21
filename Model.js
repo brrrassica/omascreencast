@@ -176,6 +176,36 @@ function sessionMatchesDevice(session, device) {
   return host !== "" && host === devHost
 }
 
+// Enter-key routing for the panel cursor. Keeping the decision here makes the
+// pointer/keyboard parity for #76 (confirm), #79 (dropped device) and #83
+// (layout trial) testable without a live Quickshell session.
+function keyboardActivation(state) {
+  var input = state || {}
+  var section = String(input.focusSection || "")
+  var index = Number(input.selectedIndex || 0)
+  var confirm = input.confirmDisconnect === true
+  var trial = input.trialActive === true
+  var service = input.hasService === true
+  var device = input.device || null
+
+  if (section === "confirm") {
+    if (!confirm) return { action: "none" }
+    return index === 0 ? { action: "confirm" } : { action: "cancel" }
+  }
+  if (section === "trial") {
+    if (!service || !trial) return { action: "none" }
+    return index === 0 ? { action: "keepTrial" } : { action: "revertTrial" }
+  }
+  if (section !== "devices" || !service || !device) return { action: "none" }
+
+  var active = input.active === true
+  if (active && input.disconnected === true)
+    return { action: "reconnect", device: device }
+  if (active && confirm) return { action: "confirm" }
+  if (active) return { action: "requestDisconnect", device: device }
+  return { action: "connect", device: device }
+}
+
 // Suffix for a virtual output row: " → Sony Bravia" when it is the cast target.
 function monitorSessionLabel(monitor, session, devices) {
   if (!monitor || !session) return ""
