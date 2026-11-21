@@ -1505,6 +1505,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
     mc = None
     browser = None
     terminal_phase = ""
+    failed = False
     try:
         try:
             srv = http.server.ThreadingHTTPServer((ip, args.port), handler)
@@ -1651,6 +1652,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
         # (the QML side keys on it); otherwise the finally below would emit a
         # misleading idle/"stopped" for a stream that never started.
         terminal_phase = "error"
+        failed = True
         emit({
             "type": "phase", "phase": "error",
             "detail": f"could not start capture pipeline: {exc}",
@@ -1669,7 +1671,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
             session_state.mark_stopped()
             log.info("stream stopped; buffer stats=%s", buf.stats())
             emit({"type": "phase", "phase": "idle", "detail": "stopped"})
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_stop(args: argparse.Namespace) -> int:

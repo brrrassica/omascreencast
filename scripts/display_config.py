@@ -626,6 +626,42 @@ def rule_for_monitor(rules: list[dict], monitor: dict) -> dict | None:
     return None
 
 
+def live_rule_fields(monitor: dict) -> dict:
+    """Effective literal fields Hyprland currently applies to a monitor.
+
+    A failed save must not leave the live layout diverged from the config it
+    reports as unchanged. When the stored rule is unreadable (or uses an old
+    selector), this live snapshot is the only rollback source available (#81).
+    Expression-valued fields are returned as their resolved literals: they can
+    be applied at runtime even though they cannot be written back to the file.
+    """
+    def _int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    fields: dict = {}
+    name = str(monitor.get("name") or "")
+    if name:
+        fields["output"] = _validate_output(name)
+    width, height = _int(monitor.get("width")), _int(monitor.get("height"))
+    if width > 0 and height > 0:
+        try:
+            hz = float(monitor.get("refreshRate") or 0)
+        except (TypeError, ValueError, OverflowError):
+            hz = 0.0
+        if hz > 0:
+            fields["mode"] = validate_field("mode", f"{width}x{height}@{round(hz, 3)}")
+    fields["position"] = f"{_int(monitor.get('x'))}x{_int(monitor.get('y'))}"
+    fields["scale"] = validate_field("scale", monitor.get("scale") or 1)
+    fields["transform"] = validate_field("transform", monitor.get("transform") or 0)
+    fields["disabled"] = monitor.get("disabled") is True
+    mirror = str(monitor.get("mirrorOf") or "")
+    fields["mirror"] = "" if mirror.lower() in ("", "none") else mirror
+    return fields
+
+
 # ---------------------------------------------------------------------------
 # Guard rails (M6): never let a layout hide every display
 # ---------------------------------------------------------------------------
@@ -1025,33 +1061,52 @@ def cmd_save(args: argparse.Namespace) -> int:
         runtime = dict(fields)
         runtime["output"] = name
         monitor = {"name": name, "description": str(rule.get("description") or "")}
-        guard_visible_layout(runtime)
-        # Snapshot the on-disk rule before applying so a persistence failure
-        # below can roll the live arrangement back to what the config still
-        # describes (#81). Best effort: an unreadable config just skips rollback.
+        known = load_monitors()
+        guard_visible_layout(runtime, known)
+        # Snapshot both the on-disk rule and the live arrangement before
+        # applying: a persistence failure below must be able to restore what
+        # the user saw, even when the config is unreadable or uses a stale
+        # selector (#81).
         try:
             previous = rule_for_monitor(parse_rules(read_config(path)), monitor)
         except (ConfigError, OSError):
             previous = None
+        live = None
+        if known:
+            for candidate in known:
+                if str(candidate.get("name") or "") == name:
+                    try:
+                        live = live_rule_fields(candidate)
+                    except ConfigError:
+                        live = None
+                    break
         applied = apply_rule(runtime)
         try:
             persisted = save_rule(path, monitor, fields)
         except (ConfigError, OSError) as exc:
             if applied.get("ok"):
                 # The runtime arrangement is already live, but persistence
-                # failed: re-apply the prior on-disk arrangement so the display
-                # never diverges from the config the command reports as
-                # unchanged (#81).
-                if previous is not None and previous.get("fields"):
-                    rollback = dict(previous["fields"])
-                    rollback["output"] = name
-                    try:
-                        apply_rule(rollback)
-                    except (ConfigError, OSError) as rollback_exc:
-                        raise ConfigError(
-                            f"{exc} (rollback of the applied arrangement"
-                            f" failed: {rollback_exc})"
-                        ) from exc
+                # failed: re-apply the prior arrangement so the display never
+                # diverges from the config the command reports as unchanged.
+                # Stored literals win over the live snapshot; non-literal
+                # fields (expressions the file editor preserves) keep their
+                # currently resolved values.
+                rollback = dict(live or {})
+                if previous is not None:
+                    rollback.update(previous.get("fields") or {})
+                rollback["output"] = name
+                if not rollback or set(rollback) == {"output"}:
+                    raise ConfigError(
+                        f"{exc} (rollback of the applied arrangement failed:"
+                        " no prior layout could be read)"
+                    ) from exc
+                try:
+                    apply_rule(rollback)
+                except (ConfigError, OSError) as rollback_exc:
+                    raise ConfigError(
+                        f"{exc} (rollback of the applied arrangement"
+                        f" failed: {rollback_exc})"
+                    ) from exc
             raise
         _emit({
             "ok": True,

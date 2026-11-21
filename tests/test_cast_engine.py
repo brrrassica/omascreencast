@@ -9,6 +9,7 @@ Run with:  python3 -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 import threading
@@ -434,6 +435,70 @@ class MainSpawnFailureTest(unittest.TestCase):
         self.assertEqual(code, 0)
         stop.assert_called_once_with(fake_args)
         emit.assert_not_called()
+
+
+class SegmenterDebugDumpTest(unittest.TestCase):
+    """A failed debug write must never kill the segmenter thread (#87)."""
+
+    def setUp(self):
+        self.cast = _load()
+
+    def test_oserror_disables_further_dumps(self):
+        path = mock.Mock()
+        path.name = "part0.m4s"
+        path.write_bytes.side_effect = OSError(28, "No space left on device")
+        log = mock.Mock()
+        state = {"ok": True}
+
+        self.cast._debug_dump(path, b"first", log, state)
+        self.assertFalse(state["ok"])
+        log.warning.assert_called_once()
+        self.cast._debug_dump(path, b"second", log, state)
+        path.write_bytes.assert_called_once()
+
+
+class StreamSetupUnwindTest(unittest.TestCase):
+    """Setup failures inside cmd_stream must unwind the server and state (#80)."""
+
+    def setUp(self):
+        self.cast = _load()
+
+    def test_mkdtemp_failure_shuts_down_server_and_marks_stopped(self):
+        server = mock.Mock()
+        emitted = []
+        args = argparse.Namespace(
+            debug=False, device="device-uuid", host="", output="HEADLESS-1",
+            codec="auto", fps=30, bitrate="6M", port=7236,
+            render_node="auto", backend="auto", experimental_av1=False,
+            gop=0, part_dur=1.0, seg_parts=5, list_parts=10,
+            keep_segments=10, no_ll=False, duration=0.0,
+        )
+        with mock.patch.object(self.cast, "setup_logging", return_value=mock.Mock()), \
+                mock.patch.dict(sys.modules, {"pychromecast": mock.Mock()}), \
+                mock.patch.object(self.cast.signal, "signal"), \
+                mock.patch.object(self.cast.session_state, "update_active"), \
+                mock.patch.object(self.cast.session_state, "device_info",
+                                  return_value={"host": "192.0.2.10"}), \
+                mock.patch.object(self.cast.session_state,
+                                  "mark_stopped") as mark_stopped, \
+                mock.patch.object(self.cast, "resolve_codec", return_value="h264"), \
+                mock.patch.object(self.cast, "detect_render_node", return_value=""), \
+                mock.patch.object(self.cast, "detect_capture_backend",
+                                  return_value="wf-recorder"), \
+                mock.patch.object(self.cast, "lan_ip", return_value="192.0.2.10"), \
+                mock.patch.object(self.cast.http.server, "ThreadingHTTPServer",
+                                  return_value=server), \
+                mock.patch.object(self.cast.threading, "Thread"), \
+                mock.patch.object(self.cast.tempfile, "mkdtemp",
+                                  side_effect=OSError(28, "No space left on device")), \
+                mock.patch.object(self.cast, "emit", side_effect=emitted.append):
+            code = self.cast.cmd_stream(args)
+
+        self.assertEqual(code, 1)
+        server.shutdown.assert_called_once()
+        server.server_close.assert_called_once()
+        mark_stopped.assert_called_once_with("error")
+        self.assertTrue(any(e.get("phase") == "error" for e in emitted))
 
 
 if __name__ == "__main__":

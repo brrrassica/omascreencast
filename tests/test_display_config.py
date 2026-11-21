@@ -524,19 +524,49 @@ class CmdSaveRollbackTest(unittest.TestCase):
             config=str(self.path),
             rule='{"name": "HEADLESS-9", "position": "3840x0"}',
         )
-        with mock.patch.object(self.dc, "save_rule",
-                               side_effect=self.dc.ConfigError("disk full")):
+        with mock.patch.object(self.dc, "load_monitors", return_value=[]), \
+                mock.patch.object(self.dc, "save_rule",
+                                  side_effect=self.dc.ConfigError("disk full")):
             code = self.dc.cmd_save(args)
         self.assertEqual(code, 1)
         self.assertEqual(len(self.applies), 1)
+
+    def test_unreadable_config_rolls_back_to_live_layout(self):
+        live = [
+            {"name": "HDMI-A-1", "width": 2560, "height": 1440,
+             "refreshRate": 59.95, "x": 0, "y": 0, "scale": 1.5,
+             "transform": 0, "disabled": False, "mirrorOf": "none"},
+            {"name": "eDP-1", "width": 1920, "height": 1080,
+             "refreshRate": 60, "x": 0, "y": 1440, "scale": 1,
+             "transform": 0, "disabled": False, "mirrorOf": "none"},
+        ]
+        args = argparse.Namespace(
+            config=str(self.path),
+            rule='{"name": "HDMI-A-1", "mode": "1920x1080@60"}',
+        )
+        with mock.patch.object(self.dc, "load_monitors", return_value=live), \
+                mock.patch.object(self.dc, "read_config",
+                                  side_effect=self.dc.ConfigError("corrupt config")), \
+                mock.patch.object(self.dc, "save_rule",
+                                  side_effect=self.dc.ConfigError("atomic write failed")):
+            code = self.dc.cmd_save(args)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.applies), 2, self.applies)
+        rolled_back = self.applies[1]
+        self.assertEqual(rolled_back["output"], "HDMI-A-1")
+        self.assertEqual(rolled_back["mode"], "2560x1440@59.95")
+        self.assertEqual(rolled_back["position"], "0x0")
+        self.assertEqual(rolled_back["scale"], 1.5)
 
     def test_failure_before_apply_does_not_rollback(self):
         args = argparse.Namespace(
             config=str(self.path),
             rule='{"name": "eDP-1", "disabled": true}',
         )
-        with mock.patch.object(self.dc, "save_rule",
-                               side_effect=self.dc.ConfigError("disk full")):
+        with mock.patch.object(self.dc, "load_monitors",
+                               return_value=[{"name": "eDP-1"}]), \
+                mock.patch.object(self.dc, "save_rule",
+                                  side_effect=self.dc.ConfigError("disk full")):
             code = self.dc.cmd_save(args)
         self.assertEqual(code, 1)
         # guard_visible_layout refuses the rule, so nothing was ever applied.
