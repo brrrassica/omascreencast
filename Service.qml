@@ -53,6 +53,9 @@ Item {
   property var trialLayout: null
   property int trialRemaining: 0
   property var pendingRevertPayload: null
+  // A trial requested while another is active waits here until its revert
+  // finishes, so the new baseline never includes an unconfirmed layout.
+  property var pendingTrial: null
   property int trialSeconds: 15
   readonly property bool trialActive: trialLayout !== null
   readonly property int trialRemainingSeconds: trialRemaining
@@ -60,6 +63,10 @@ Item {
   property string dropPolicy: "keep"
   property var pendingReconnectDevice: null
   property bool handlingDrop: false
+  // Monotonic generation for session operations. A keep result is only applied
+  // while it still belongs to the drop that launched it.
+  property int sessionOp: 0
+  property int keepOp: -1
   readonly property bool disconnected: activeSession !== null
     && String(activePhase) === "disconnected"
   // Manually entered receivers survive every watcher snapshot; the engine
@@ -266,8 +273,39 @@ Item {
   }
 
   // M6 trial: apply provisionally, then auto-revert unless kept.
+  function startTrial(payload, previous) {
+    trialLayout = {
+      name: String(payload.name || ""),
+      description: String(payload.description || ""),
+      previous: previous || {}
+    }
+    trialRemaining = Math.max(3, trialSeconds)
+    displayTrialTimer.restart()
+    applyDisplayRule(payload)
+  }
+
+  // Called from displayApplyProc once the outstanding trial has been reverted.
+  function startPendingTrial() {
+    var next = pendingTrial
+    if (!next) return
+    pendingTrial = null
+    startTrial(next.payload, next.previous)
+  }
+
   function beginDisplayTrial(payload) {
-    if (displayBusy || !payload) return
+    if (displayBusy || !payload || pendingTrial !== null) return
+    if (trialLayout) {
+      // Snapshotting live state here would capture the first trial's layout:
+      // revert to its original baseline, then start the new trial from that.
+      var outstanding = trialLayout
+      var previous = outstanding.previous || {}
+      pendingTrial = { payload: payload, previous: previous }
+      trialLayout = null
+      trialRemaining = 0
+      displayTrialTimer.stop()
+      if (!revertTrialLayout(outstanding)) startPendingTrial()
+      return
+    }
     var monitor = null
     for (var i = 0; i < monitors.length; i++) {
       if (String(monitors[i].name || "") === String(payload.name || "")) {
@@ -275,20 +313,13 @@ Item {
         break
       }
     }
-    var previous = monitor
+    startTrial(payload, monitor
       ? Model.displayFieldsFor(monitor, displayRules)
-      : {}
-    trialLayout = {
-      name: String(payload.name || ""),
-      description: String(payload.description || ""),
-      previous: previous
-    }
-    trialRemaining = Math.max(3, trialSeconds)
-    displayTrialTimer.restart()
-    applyDisplayRule(payload)
+      : {})
   }
 
   function keepDisplayTrial() {
+    pendingTrial = null
     if (!trialLayout) return
     trialLayout = null
     trialRemaining = 0
@@ -297,26 +328,36 @@ Item {
     notify(Model.tr(uiLanguage, "layout_kept"), "", "low")
   }
 
+  // Returns false when there was nothing to apply, so the caller can continue
+  // immediately instead of waiting for a process that will never start.
+  function revertTrialLayout(trial) {
+    if (!trial) return false
+    var fields = trial.previous || {}
+    if (String(fields.mode || "") === "") {
+      notify(Model.tr(uiLanguage, "layout_reverted"), "", "low")
+      return false
+    }
+    var payload = Model.displayRulePayload(
+      { name: trial.name, description: trial.description }, fields)
+    applyDisplayRule(payload, true)
+    notify(Model.tr(uiLanguage, "layout_reverted"), "", "low")
+    return true
+  }
+
   function revertDisplayTrial() {
     if (!trialLayout) return
     var trial = trialLayout
     trialLayout = null
     trialRemaining = 0
     displayTrialTimer.stop()
-    var fields = trial.previous || {}
-    if (String(fields.mode || "") === "") {
-      notify(Model.tr(uiLanguage, "layout_reverted"), "", "low")
-      return
-    }
-    var payload = Model.displayRulePayload(
-      { name: trial.name, description: trial.description }, fields)
-    applyDisplayRule(payload, true)
-    notify(Model.tr(uiLanguage, "layout_reverted"), "", "low")
+    pendingTrial = null
+    revertTrialLayout(trial)
   }
 
   // Apply and persist into monitors.lua (backed up + atomic).
   function saveDisplayRule(payload) {
     if (displayBusy || !payload) return
+    pendingTrial = null
     if (trialLayout) keepDisplayTrial()
     displayError = ""
     displayBusy = true
@@ -343,6 +384,8 @@ Item {
       lastError = "Disconnect the active session first"
       return false
     }
+    sessionOp = sessionOp + 1
+    handlingDrop = false
     reconnectTimer.stop()
     var retrying = retry === true
     var opts = options || {}
@@ -375,6 +418,7 @@ Item {
   // handler relies on this so a refused stop does not set userInitiatedStop.
   function disconnect() {
     if (sessionBusy || activeSession === null) return false
+    sessionOp = sessionOp + 1
     reconnectTimer.stop()
     pendingReconnectDevice = null
     handlingDrop = false
@@ -390,6 +434,7 @@ Item {
   // M6: an unexpected receiver/network drop. Keep or remove the virtual output
   // per the user's preference, and reconnect when opted in.
   function handleUnexpectedDrop(detail) {
+    sessionOp = sessionOp + 1
     var previous = activeSession || {}
     var device = Model.reconnectDeviceFromSession(previous)
     var target = Model.sessionTargetLabel(previous, devices)
@@ -423,6 +468,10 @@ Item {
     } else {
       notify(Model.tr(uiLanguage, "tv_disconnected"),
         Model.tr(uiLanguage, "monitor_kept"), "normal")
+      // Keep touches the same state file as create/remove: serialize it so a
+      // reconnect cannot start underneath it.
+      keepOp = sessionOp
+      sessionBusy = true
       keepProc.command = [pythonPath, sessionScript, "keep"]
       keepProc.running = true
     }
@@ -431,6 +480,7 @@ Item {
   // M6: idempotent teardown for plugin disable/remove or a manual IPC call.
   function teardownSession() {
     if (sessionBusy || teardownProc.running) return
+    sessionOp = sessionOp + 1
     sessionBusy = true
     handlingDrop = false
     pendingReconnectDevice = null
@@ -849,6 +899,9 @@ Item {
           root.pendingReconnectDevice = null
           root.reconnectAttempts = 0
           root.lastError = r.error !== "" ? r.error : "Could not stop the session"
+          // The stop did not happen: a later receiver drop is genuine and must
+          // still go through the configured drop policy.
+          root.userInitiatedStop = false
           root.notify(Model.tr(root.uiLanguage, "cast_failed"), root.lastError, "critical")
         }
         root.refreshMonitors()
@@ -859,7 +912,11 @@ Item {
       waitForEnd: true
       onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
     }
-    onExited: if (root.sessionBusy) root.sessionBusy = false
+    onExited: if (root.sessionBusy) {
+      // No parsable result: treat the stop as failed as well.
+      root.sessionBusy = false
+      root.userInitiatedStop = false
+    }
   }
 
   Process {
@@ -887,8 +944,13 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var r = Model.parseSession(text)
+        // A newer connect/remove/drop owns the session now; its state must not
+        // be overwritten with this stale disconnected record.
+        if (root.keepOp !== root.sessionOp) return
+        root.keepOp = -1
+        root.sessionBusy = false
         root.handlingDrop = false
+        var r = Model.parseSession(text)
         if (r.ok && r.active) {
           root.activeSession = r.active
           root.eventPhase = "disconnected"
@@ -902,6 +964,8 @@ Item {
       waitForEnd: true
       onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
     }
+    onExited: if (root.sessionBusy && root.keepOp === root.sessionOp)
+      root.sessionBusy = false
   }
 
   // M6: idempotent teardown for plugin disable/remove or the IPC surface.
@@ -961,9 +1025,11 @@ Item {
         root.displayBusy = false
         if (!r.ok) {
           root.displayError = r.error !== "" ? r.error : "Could not apply the display layout"
-          // A refused/failed trial never took effect, so do not "revert" it.
+          // A refused/failed apply never took effect, so do not "revert" it
+          // and do not start a trial queued behind it.
           root.trialLayout = null
           root.trialRemaining = 0
+          root.pendingTrial = null
           displayTrialTimer.stop()
         }
         root.refreshMonitors()
@@ -971,6 +1037,7 @@ Item {
         var pending = root.pendingRevertPayload
         root.pendingRevertPayload = null
         if (pending !== null) root.applyDisplayRule(pending, true)
+        else root.startPendingTrial()
       }
     }
     stderr: StdioCollector {
