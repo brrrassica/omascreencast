@@ -251,9 +251,14 @@ impl TrustStore {
                 client.id
             )));
         }
+        let previous = self.clients.clone();
         self.clients.retain(|existing| existing.id != client.id);
         self.clients.push(client);
-        self.save(paths)
+        if let Err(error) = self.save(paths) {
+            self.clients = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Remove a client by id and persist.
@@ -265,11 +270,14 @@ impl TrustStore {
     ///
     /// [`TrustError::Io`] when the store cannot be written.
     pub fn remove(&mut self, id: &str, paths: &IdentityPaths) -> Result<bool, TrustError> {
-        let before = self.clients.len();
+        let previous = self.clients.clone();
         self.clients.retain(|client| client.id != id);
-        let removed = self.clients.len() != before;
+        let removed = self.clients.len() != previous.len();
         if removed {
-            self.save(paths)?;
+            if let Err(error) = self.save(paths) {
+                self.clients = previous;
+                return Err(error);
+            }
         }
         Ok(removed)
     }
