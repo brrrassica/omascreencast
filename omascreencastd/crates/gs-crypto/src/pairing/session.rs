@@ -561,16 +561,65 @@ impl PairingManager {
         proof: &[u8],
         now: SystemTime,
     ) -> Result<PairedClient, PairingError> {
-        let crypto = Arc::clone(&self.crypto);
-        let session = self.mutable(id, now)?;
+        let paired = self.verify_client_secret(id, proof, now)?;
+        self.complete_client_secret(id, now)?;
+        Ok(paired)
+    }
+
+    /// Verify the client's proof without mutating pairing session state.
+    ///
+    /// This is the read-only half of the two-phase client-secret flow. It
+    /// checks the session phase, expiry, and proof, returning the paired client
+    /// identity on success while leaving the session in
+    /// [`PairingPhase::AwaitingClientSecret`]. Call
+    /// [`Self::complete_client_secret`] only after any external side effects
+    /// required for pairing success (such as persisting the trusted client)
+    /// have succeeded.
+    ///
+    /// # Errors
+    ///
+    /// - [`PairingError::OutOfOrder`] when the session is not awaiting the
+    ///   client's secret;
+    /// - [`PairingError::ChallengeRejected`] when the proof does not match.
+    pub fn verify_client_secret(
+        &self,
+        id: &str,
+        proof: &[u8],
+        now: SystemTime,
+    ) -> Result<PairedClient, PairingError> {
+        let session = self.get(id, now)?;
         session.require(PairingPhase::AwaitingClientSecret)?;
         let expected = session
             .expected_client_proof
             .as_deref()
             .ok_or(PairingError::ChallengeRejected)?;
-        if !crypto.proofs_match(expected, proof) {
+        if !self.crypto.proofs_match(expected, proof) {
             return Err(PairingError::ChallengeRejected);
         }
+        Ok(PairedClient {
+            id: session.id.clone(),
+            name: session.client.name.clone(),
+            address: session.client.address.clone(),
+        })
+    }
+
+    /// Mark a verified client-secret exchange as complete.
+    ///
+    /// This is the mutating half of the two-phase client-secret flow. It should
+    /// be called after [`Self::verify_client_secret`] and after any external
+    /// side effects required for pairing success have succeeded.
+    ///
+    /// # Errors
+    ///
+    /// - [`PairingError::OutOfOrder`] when the session is not awaiting the
+    ///   client's secret.
+    pub fn complete_client_secret(
+        &mut self,
+        id: &str,
+        now: SystemTime,
+    ) -> Result<PairedClient, PairingError> {
+        let session = self.mutable(id, now)?;
+        session.require(PairingPhase::AwaitingClientSecret)?;
         session.phase = PairingPhase::Complete;
         Ok(PairedClient {
             id: session.id.clone(),
@@ -997,5 +1046,103 @@ mod tests {
         assert!(PairingPhase::AwaitingClientSecret.is_pending());
         assert!(!PairingPhase::Complete.is_pending());
         assert_eq!(PairingPhase::AwaitingApproval.as_str(), "awaiting_approval");
+    }
+
+    fn prepare_client_secret(manager: &mut PairingManager, id: &str, pin: &str) -> Vec<u8> {
+        manager
+            .accept_client_challenge(id, b"client-challenge".to_vec(), t0())
+            .unwrap();
+        let challenge = manager
+            .approve(id, &Pin::parse(pin).unwrap(), later(1))
+            .unwrap()
+            .expect("challenge should be issued once the client challenge exists");
+        let key = ReferenceCrypto
+            .derive_pin_key(
+                &Pin::parse(pin).unwrap(),
+                manager.get(id, t0()).unwrap().salt(),
+            )
+            .unwrap();
+        ReferenceCrypto
+            .expected_client_proof(&key, &challenge.challenge)
+            .unwrap()
+    }
+
+    #[test]
+    fn verify_client_secret_does_not_mutate_session_state() {
+        let mut manager = manager();
+        let (info, _) = manager
+            .begin(ClientInfo::new("TV", "10.0.0.2"), t0())
+            .unwrap();
+        let proof = prepare_client_secret(&mut manager, &info.id, "1234");
+
+        let paired = manager
+            .verify_client_secret(&info.id, &proof, later(2))
+            .unwrap();
+        assert_eq!(paired.id, info.id);
+        assert_eq!(
+            manager.get(&info.id, later(2)).unwrap().phase(),
+            PairingPhase::AwaitingClientSecret
+        );
+    }
+
+    #[test]
+    fn complete_client_secret_marks_session_complete() {
+        let mut manager = manager();
+        let (info, _) = manager
+            .begin(ClientInfo::new("TV", "10.0.0.2"), t0())
+            .unwrap();
+        let proof = prepare_client_secret(&mut manager, &info.id, "1234");
+
+        manager
+            .verify_client_secret(&info.id, &proof, later(2))
+            .unwrap();
+        let paired = manager.complete_client_secret(&info.id, later(2)).unwrap();
+        assert_eq!(paired.id, info.id);
+        assert_eq!(
+            manager.get(&info.id, later(2)).unwrap().phase(),
+            PairingPhase::Complete
+        );
+    }
+
+    #[test]
+    fn verify_then_external_failure_allows_retry() {
+        let mut manager = manager();
+        let (info, _) = manager
+            .begin(ClientInfo::new("TV", "10.0.0.2"), t0())
+            .unwrap();
+        let proof = prepare_client_secret(&mut manager, &info.id, "1234");
+
+        // Simulate external validation/persistence failure after verification:
+        // the caller does not complete the session.
+        manager
+            .verify_client_secret(&info.id, &proof, later(2))
+            .unwrap();
+        assert_eq!(
+            manager.get(&info.id, later(2)).unwrap().phase(),
+            PairingPhase::AwaitingClientSecret
+        );
+
+        // The client can retry with the same proof once the external issue is
+        // resolved.
+        let paired = manager
+            .accept_client_secret(&info.id, &proof, later(3))
+            .unwrap();
+        assert_eq!(paired.id, info.id);
+        assert_eq!(
+            manager.get(&info.id, later(3)).unwrap().phase(),
+            PairingPhase::Complete
+        );
+    }
+
+    #[test]
+    fn complete_client_secret_requires_awaiting_client_secret() {
+        let mut manager = manager();
+        let (info, _) = manager
+            .begin(ClientInfo::new("TV", "10.0.0.2"), t0())
+            .unwrap();
+        assert!(matches!(
+            manager.complete_client_secret(&info.id, t0()),
+            Err(PairingError::OutOfOrder { .. })
+        ));
     }
 }

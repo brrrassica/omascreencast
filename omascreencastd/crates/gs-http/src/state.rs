@@ -508,11 +508,15 @@ impl DaemonState {
     ///
     /// `client_der` is the certificate the client presented on the connection;
     /// without it the host has nothing to remember and the pairing is refused.
+    /// The certificate is validated and the proof is verified before pairing
+    /// session state is mutated, and the session is only completed after the
+    /// trusted client has been persisted successfully.
     ///
     /// # Errors
     ///
     /// [`HttpError`] when the proof does not verify, the session is not in the
-    /// right phase, or the trust store cannot be written.
+    /// right phase, the client certificate is missing or invalid, or the trust
+    /// store cannot be written.
     pub fn accept_client_secret(
         &self,
         id: &str,
@@ -522,7 +526,6 @@ impl DaemonState {
         let paired = {
             let now = self.now();
             let mut shared = self.shared();
-            let paired = shared.pairing.accept_client_secret(id, proof, now)?;
             let Some(der) = client_der else {
                 return Err(HttpError::BadRequest(String::from(
                     "pairing requires the client to present a certificate",
@@ -530,6 +533,7 @@ impl DaemonState {
             };
             let fingerprint = certificate_fingerprint(der)
                 .map_err(|error| HttpError::BadRequest(error.to_string()))?;
+            let paired = shared.pairing.verify_client_secret(id, proof, now)?;
             let record = TrustedClient::new(
                 &paired.id,
                 &paired.name,
@@ -541,6 +545,7 @@ impl DaemonState {
                 .trust
                 .add(record, &self.inner.paths)
                 .map_err(|error| HttpError::Internal(error.to_string()))?;
+            shared.pairing.complete_client_secret(id, now)?;
             paired
         };
         self.inner.events.pairing_result(&paired.id, true);
@@ -667,5 +672,109 @@ mod tests {
         let id = DaemonState::derive_uniqueid(&first);
         assert_eq!(id.len(), 36);
         assert_eq!(id.as_bytes()[8], b'-');
+    }
+
+    fn drive_to_awaiting_client_secret(state: &DaemonState) -> (String, Vec<u8>, Vec<u8>) {
+        use gs_crypto::PairingCrypto as _;
+
+        let info = state.begin_pairing("TV", "10.0.0.2").unwrap();
+        state
+            .accept_client_challenge(&info.id, b"client-challenge".to_vec())
+            .unwrap();
+        let pin = gs_crypto::Pin::parse("1234").unwrap();
+        let challenge = state
+            .approve_pairing(&info.id, &pin)
+            .unwrap()
+            .expect("server challenge");
+        let salt = state
+            .shared()
+            .pairing
+            .get(&info.id, state.now())
+            .unwrap()
+            .salt()
+            .to_vec();
+        let key = gs_crypto::ReferenceCrypto
+            .derive_pin_key(&pin, &salt)
+            .unwrap();
+        let proof = gs_crypto::ReferenceCrypto
+            .expected_client_proof(&key, &challenge.challenge)
+            .unwrap();
+        let client_der = Identity::generate("client")
+            .unwrap()
+            .certificate_der()
+            .unwrap();
+        (info.id, proof, client_der)
+    }
+
+    #[test]
+    fn missing_client_certificate_does_not_complete_pairing() {
+        let (_dir, state) = state();
+        let (id, proof, client_der) = drive_to_awaiting_client_secret(&state);
+
+        let error = state.accept_client_secret(&id, &proof, None).unwrap_err();
+        assert!(matches!(error, HttpError::BadRequest(_)));
+        assert_eq!(
+            state.phase_of(&id),
+            Some(PairingPhase::AwaitingClientSecret)
+        );
+        assert!(!state.is_paired());
+
+        state
+            .accept_client_secret(&id, &proof, Some(&client_der))
+            .unwrap();
+        assert_eq!(state.phase_of(&id), Some(PairingPhase::Complete));
+        assert!(state.is_paired());
+    }
+
+    #[test]
+    fn invalid_client_certificate_does_not_complete_pairing() {
+        let (_dir, state) = state();
+        let (id, proof, client_der) = drive_to_awaiting_client_secret(&state);
+
+        let error = state
+            .accept_client_secret(&id, &proof, Some(b"not der"))
+            .unwrap_err();
+        assert!(matches!(error, HttpError::BadRequest(_)));
+        assert_eq!(
+            state.phase_of(&id),
+            Some(PairingPhase::AwaitingClientSecret)
+        );
+        assert!(!state.is_paired());
+
+        state
+            .accept_client_secret(&id, &proof, Some(&client_der))
+            .unwrap();
+        assert_eq!(state.phase_of(&id), Some(PairingPhase::Complete));
+    }
+
+    #[test]
+    fn trust_store_failure_does_not_complete_pairing() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_dir, state) = state();
+        let (id, proof, client_der) = drive_to_awaiting_client_secret(&state);
+
+        let clients_dir = state.paths().clients.parent().unwrap();
+        let original = std::fs::metadata(clients_dir).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_mode(0o555);
+        std::fs::set_permissions(clients_dir, readonly).unwrap();
+
+        let error = state
+            .accept_client_secret(&id, &proof, Some(&client_der))
+            .unwrap_err();
+        assert!(matches!(error, HttpError::Internal(_)));
+        assert_eq!(
+            state.phase_of(&id),
+            Some(PairingPhase::AwaitingClientSecret)
+        );
+        assert!(!state.is_paired());
+
+        std::fs::set_permissions(clients_dir, original).unwrap();
+        state
+            .accept_client_secret(&id, &proof, Some(&client_der))
+            .unwrap();
+        assert_eq!(state.phase_of(&id), Some(PairingPhase::Complete));
+        assert!(state.is_paired());
     }
 }
