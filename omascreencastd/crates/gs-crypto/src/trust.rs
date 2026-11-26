@@ -389,6 +389,47 @@ mod tests {
     }
 
     #[test]
+    fn failed_add_leaves_the_in_memory_store_unchanged() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_dir, paths) = temp_paths();
+        let mut store = TrustStore::empty();
+        let dir = paths.clients.parent().unwrap();
+        let original = fs::metadata(dir).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_mode(0o555);
+        fs::set_permissions(dir, readonly).unwrap();
+
+        assert!(store.add(sample("a"), &paths).is_err());
+
+        fs::set_permissions(dir, original).unwrap();
+        assert!(store.is_empty());
+        assert!(!store.is_trusted(&fingerprint(0)));
+        store.add(sample("a"), &paths).unwrap();
+        assert!(store.is_trusted(&fingerprint(0)));
+    }
+
+    #[test]
+    fn failed_remove_keeps_the_client_trusted_in_memory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_dir, paths) = temp_paths();
+        let mut store = TrustStore::empty();
+        store.add(sample("a"), &paths).unwrap();
+        let dir = paths.clients.parent().unwrap();
+        let original = fs::metadata(dir).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_mode(0o555);
+        fs::set_permissions(dir, readonly).unwrap();
+
+        assert!(store.remove("a", &paths).is_err());
+
+        fs::set_permissions(dir, original).unwrap();
+        assert!(store.is_trusted(&fingerprint(0)));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
     fn the_store_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
         let (_dir, paths) = temp_paths();

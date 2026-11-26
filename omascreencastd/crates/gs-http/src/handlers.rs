@@ -194,6 +194,10 @@ fn pair(state: &DaemonState, request: &Request, peer: Peer<'_>) -> Result<Respon
                     &name,
                     peer.address,
                     request.query_param("salt").as_deref().map(str::to_owned),
+                    request
+                        .query_param("clientcert")
+                        .as_deref()
+                        .map(str::to_owned),
                 )?;
             }
             Ok(xml_response(xml::server_certificate(pem)))
@@ -550,6 +554,23 @@ mod tests {
         let pending = state.pending_pairings();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].name, "Living Room TV");
+    }
+
+    #[test]
+    fn pair_stores_the_clientcert_query_parameter() {
+        let (_dir, state) = state();
+        let mut request = request("GET", "/pair", "");
+        request.query = format!(
+            "devicename=TV&clientcert={}",
+            xml::hex_encode(b"client-der")
+        );
+        assert_eq!(handle(&state, &request, peer("10.0.0.2")).status, 200);
+
+        let id = state.session_for_address("10.0.0.2").unwrap();
+        assert_eq!(
+            state.client_certificate_der(&id).as_deref(),
+            Some(b"client-der".as_slice())
+        );
     }
 
     #[test]

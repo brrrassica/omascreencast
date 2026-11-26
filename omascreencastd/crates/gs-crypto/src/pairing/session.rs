@@ -167,6 +167,10 @@ pub struct PairingSession {
     /// the `/clientchallenge` response was already sent).
     server_proof: Option<Vec<u8>>,
     expected_client_proof: Option<Vec<u8>>,
+    /// Client certificate supplied on the first `/pair` request
+    /// (`clientcert=<hex DER>`). Used as a trust anchor when the transport
+    /// cannot present a TLS peer certificate (#93).
+    client_certificate_der: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for PairingSession {
@@ -186,6 +190,12 @@ impl PairingSession {
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The certificate the client sent with its first pairing request, if any.
+    #[must_use]
+    pub fn client_certificate_der(&self) -> Option<&[u8]> {
+        self.client_certificate_der.as_deref()
     }
 
     /// The current phase.
@@ -333,7 +343,8 @@ impl PairingManager {
         client: ClientInfo,
         now: SystemTime,
     ) -> Result<(PendingInfo, PairingEvent), PairingError> {
-        self.begin_with_salt(client, now, None)
+        let (info, event, _) = self.begin_with_salt(client, now, None, None)?;
+        Ok((info, event))
     }
 
     /// Open a pairing session with a salt supplied by the caller.
@@ -348,7 +359,11 @@ impl PairingManager {
     /// matter how correct the KDF was.
     ///
     /// `None` asks the host to generate one, which is kept for tests and for a
-    /// client that omits the parameter.
+    /// client that omits the parameter. `client_certificate_der` is the hex DER
+    /// certificate from the same first request, kept as a fallback trust anchor.
+    ///
+    /// The third return value is the ids of sessions expired by this call; the
+    /// caller turns each into a rejected `pairing_result` event (#101).
     ///
     /// # Errors
     ///
@@ -359,8 +374,9 @@ impl PairingManager {
         client: ClientInfo,
         now: SystemTime,
         salt: Option<Vec<u8>>,
-    ) -> Result<(PendingInfo, PairingEvent), PairingError> {
-        self.expire(now);
+        client_certificate_der: Option<Vec<u8>>,
+    ) -> Result<(PendingInfo, PairingEvent, Vec<String>), PairingError> {
+        let expired = self.expire(now);
         if self.pending_count() >= self.max_pending {
             return Err(PairingError::TooManyPending {
                 max: self.max_pending,
@@ -394,10 +410,11 @@ impl PairingManager {
             server_challenge: None,
             server_proof: None,
             expected_client_proof: None,
+            client_certificate_der,
         };
         let info = session.pending_info();
         self.sessions.insert(id, session);
-        Ok((info.clone(), PairingEvent::pending(&info)))
+        Ok((info.clone(), PairingEvent::pending(&info), expired))
     }
 
     /// Look up a live session, refusing an expired one.
@@ -967,6 +984,53 @@ mod tests {
         expected.sort();
         assert_eq!(removed, expected);
         assert_eq!(manager.pending_count(), 0);
+    }
+
+    #[test]
+    fn begin_with_salt_reports_sessions_expired_during_begin() {
+        let mut manager = manager();
+        let (old, _, _) = manager
+            .begin_with_salt(ClientInfo::new("A", "10.0.0.2"), t0(), None, None)
+            .unwrap();
+        let (fresh, _, expired) = manager
+            .begin_with_salt(
+                ClientInfo::new("B", "10.0.0.3"),
+                later(PAIRING_SESSION_TTL_SECONDS + 1),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(expired, vec![old.id.clone()]);
+        assert_eq!(
+            lookup_error(&manager, &old.id, t0()),
+            PairingError::UnknownSession
+        );
+        assert!(
+            manager
+                .get(&fresh.id, later(PAIRING_SESSION_TTL_SECONDS + 1))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn begin_with_salt_keeps_the_client_certificate() {
+        let mut manager = manager();
+        let der = b"client-der".to_vec();
+        let (info, _, _) = manager
+            .begin_with_salt(
+                ClientInfo::new("TV", "10.0.0.2"),
+                t0(),
+                None,
+                Some(der.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .get(&info.id, t0())
+                .unwrap()
+                .client_certificate_der(),
+            Some(der.as_slice())
+        );
     }
 
     #[test]

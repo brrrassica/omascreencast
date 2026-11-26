@@ -392,16 +392,19 @@ impl DaemonState {
         name: &str,
         address: &str,
     ) -> Result<gs_crypto::PendingInfo, HttpError> {
-        self.begin_pairing_with_salt(name, address, None)
+        self.begin_pairing_with_salt(name, address, None, None)
     }
 
-    /// Begin a pairing session, optionally with the salt the client chose.
+    /// Begin a pairing session with the client-chosen salt and certificate.
     ///
     /// A captured Moonlight client selects the salt and sends it on the first
-    /// `/pair` request, so the host must adopt it rather than invent one. The
-    /// value arrives hex-encoded; a malformed one falls back to a host-generated
-    /// salt instead of failing the request, because a client that cannot pair
-    /// needs to see an explicit protocol error, not a silent expiry.
+    /// `/pair` request, together with its own DER certificate as `clientcert`.
+    /// Both arrive hex-encoded; a malformed value is ignored rather than
+    /// failing the request, so a client that cannot pair gets an explicit
+    /// protocol error later instead of a silent expiry.
+    ///
+    /// Sessions that expire during this call are reported as rejected results
+    /// before the new prompt is announced (#101).
     ///
     /// # Errors
     ///
@@ -411,18 +414,29 @@ impl DaemonState {
         name: &str,
         address: &str,
         salt_hex: Option<String>,
+        clientcert_hex: Option<String>,
     ) -> Result<gs_crypto::PendingInfo, HttpError> {
         let now = self.now();
         let salt = salt_hex
             .as_deref()
             .and_then(|value| crate::xml::hex_decode(value).ok())
             .filter(|decoded| !decoded.is_empty());
-        let (info, event) = {
+        let client_certificate_der = clientcert_hex
+            .as_deref()
+            .and_then(|value| crate::xml::hex_decode(value).ok())
+            .filter(|decoded| !decoded.is_empty());
+        let (info, event, expired) = {
             let mut shared = self.shared();
-            shared
-                .pairing
-                .begin_with_salt(ClientInfo::new(name, address), now, salt)?
+            shared.pairing.begin_with_salt(
+                ClientInfo::new(name, address),
+                now,
+                salt,
+                client_certificate_der,
+            )?
         };
+        for id in expired {
+            self.inner.events.pairing_result(&id, false);
+        }
         if let PairingEvent::Pending { id, name, address } = event {
             self.inner
                 .events
@@ -448,6 +462,16 @@ impl DaemonState {
             .get(id, self.now())
             .ok()
             .map(gs_crypto::PairingSession::phase)
+    }
+
+    /// The certificate captured from the client's first pairing request.
+    #[must_use]
+    pub fn client_certificate_der(&self, id: &str) -> Option<Vec<u8>> {
+        self.shared()
+            .pairing
+            .get(id, self.now())
+            .ok()
+            .and_then(|session| session.client_certificate_der().map(<[u8]>::to_vec))
     }
 
     /// Record the client's challenge; returns the response to send once the
@@ -507,8 +531,9 @@ impl DaemonState {
     /// Record the client's proof and persist the client on success.
     ///
     /// `client_der` is the certificate the client presented on the connection;
-    /// without it the host has nothing to remember and the pairing is refused.
-    /// The certificate is validated and the proof is verified before pairing
+    /// when absent, the certificate stored from the first `/pair` request is
+    /// used. Without either the host has nothing to remember and the pairing is
+    /// refused. The certificate is validated and the proof is verified before pairing
     /// session state is mutated, and the session is only completed after the
     /// trusted client has been persisted successfully.
     ///
@@ -526,12 +551,21 @@ impl DaemonState {
         let paired = {
             let now = self.now();
             let mut shared = self.shared();
-            let Some(der) = client_der else {
+            // Prefer the certificate presented on this connection, then a body
+            // certificate, then the one sent with the first `/pair` request.
+            let der = client_der.map(<[u8]>::to_vec).or_else(|| {
+                shared
+                    .pairing
+                    .get(id, now)
+                    .ok()
+                    .and_then(|session| session.client_certificate_der().map(<[u8]>::to_vec))
+            });
+            let Some(der) = der else {
                 return Err(HttpError::BadRequest(String::from(
                     "pairing requires the client to present a certificate",
                 )));
             };
-            let fingerprint = certificate_fingerprint(der)
+            let fingerprint = certificate_fingerprint(&der)
                 .map_err(|error| HttpError::BadRequest(error.to_string()))?;
             let paired = shared.pairing.verify_client_secret(id, proof, now)?;
             let record = TrustedClient::new(
@@ -608,9 +642,27 @@ impl DaemonState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tempfile::TempDir;
 
+    #[derive(Debug, Default)]
+    struct RecordingEventSink {
+        results: Mutex<Vec<(String, bool)>>,
+    }
+
+    impl EventSink for RecordingEventSink {
+        fn pairing_pending(&self, _info: &gs_crypto::PendingInfo) {}
+
+        fn pairing_result(&self, id: &str, ok: bool) {
+            self.results.lock().unwrap().push((id.to_owned(), ok));
+        }
+    }
+
     fn state() -> (TempDir, DaemonState) {
+        state_with_sink(Arc::new(NullEventSink))
+    }
+
+    fn state_with_sink(sink: Arc<dyn EventSink>) -> (TempDir, DaemonState) {
         let dir = tempfile::tempdir().unwrap();
         let paths = gs_crypto::paths_under(dir.path());
         let identity = Identity::generate("host").unwrap();
@@ -622,13 +674,7 @@ mod tests {
             47984,
             48010,
         );
-        let state = DaemonState::new(
-            identity,
-            paths,
-            config,
-            Arc::new(NullEventSink),
-            TrustStore::empty(),
-        );
+        let state = DaemonState::new(identity, paths, config, sink, TrustStore::empty());
         (dir, state)
     }
 
@@ -776,5 +822,78 @@ mod tests {
             .unwrap();
         assert_eq!(state.phase_of(&id), Some(PairingPhase::Complete));
         assert!(state.is_paired());
+    }
+
+    #[test]
+    fn begin_pairing_rejects_sessions_expired_during_begin() {
+        let sink = Arc::new(RecordingEventSink::default());
+        let (_dir, state) = state_with_sink(sink.clone());
+        let now = SystemTime::now();
+        let state = state.with_clock(Clock::fixed(now));
+        let old = state.begin_pairing("A", "10.0.0.2").unwrap();
+        let state = state.with_clock(Clock::fixed(
+            now + Duration::from_secs(gs_proto::PAIRING_SESSION_TTL_SECONDS + 1),
+        ));
+        let fresh = state.begin_pairing("B", "10.0.0.3").unwrap();
+
+        assert_ne!(old.id, fresh.id);
+        assert_eq!(*sink.results.lock().unwrap(), vec![(old.id, false)]);
+    }
+
+    #[test]
+    fn query_client_certificate_anchors_trust_without_peer_cert() {
+        use gs_crypto::PairingCrypto as _;
+
+        let (_dir, state) = state();
+        let der = Identity::generate("client")
+            .unwrap()
+            .certificate_der()
+            .unwrap();
+        let hex = crate::xml::hex_encode(&der);
+        let info = state
+            .begin_pairing_with_salt("TV", "10.0.0.2", None, Some(hex))
+            .unwrap();
+        state
+            .accept_client_challenge(&info.id, b"client-challenge".to_vec())
+            .unwrap();
+        let pin = gs_crypto::Pin::parse("1234").unwrap();
+        let challenge = state
+            .approve_pairing(&info.id, &pin)
+            .unwrap()
+            .expect("challenge");
+        let salt = state
+            .shared()
+            .pairing
+            .get(&info.id, state.now())
+            .unwrap()
+            .salt()
+            .to_vec();
+        let key = gs_crypto::ReferenceCrypto
+            .derive_pin_key(&pin, &salt)
+            .unwrap();
+        let proof = gs_crypto::ReferenceCrypto
+            .expected_client_proof(&key, &challenge.challenge)
+            .unwrap();
+
+        state.accept_client_secret(&info.id, &proof, None).unwrap();
+        assert!(state.is_paired());
+    }
+
+    #[test]
+    fn retryable_certificate_failures_do_not_emit_a_terminal_event() {
+        let sink = Arc::new(RecordingEventSink::default());
+        let (_dir, state) = state_with_sink(sink.clone());
+        let (id, proof, der) = drive_to_awaiting_client_secret(&state);
+
+        assert!(state.accept_client_secret(&id, &proof, None).is_err());
+        assert!(
+            state
+                .accept_client_secret(&id, &proof, Some(b"not der"))
+                .is_err()
+        );
+        assert!(sink.results.lock().unwrap().is_empty());
+
+        state.accept_client_secret(&id, &proof, Some(&der)).unwrap();
+        assert_eq!(*sink.results.lock().unwrap(), vec![(id, true)]);
     }
 }
