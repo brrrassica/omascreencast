@@ -25,7 +25,7 @@
 //! plaintext RTSP and logs that an encrypted offer was seen but not honoured;
 //! M6-T10 makes `rtspenc` mandatory once the capture pins the derivation.
 
-use std::io::{Read as _, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +47,10 @@ pub const IO_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// How long the accept loop sleeps between polls while shutting down.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Injection point for the PLAY capture thread, so a spawn failure is testable.
+type CaptureSpawner =
+    fn(Arc<IpcHub>, String, u32, u32, u32, Arc<AtomicBool>) -> io::Result<JoinHandle<()>>;
 
 /// Why the RTSP listener could not start or stop.
 #[derive(Debug, thiserror::Error)]
@@ -314,28 +318,68 @@ fn setup(
     wrap(response)
 }
 
-fn play(connection: &mut Connection, wrap: impl FnOnce(Response) -> Response) -> Response {
+fn spawn_capture(
+    hub: Arc<IpcHub>,
+    output: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    stop: Arc<AtomicBool>,
+) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name(String::from("osc-capture"))
+        .spawn(move || capture_loop(&hub, &output, width, height, fps, &stop))
+}
+
+fn play(connection: &mut Connection, wrap: impl Fn(Response) -> Response) -> Response {
+    play_with(connection, wrap, spawn_capture)
+}
+
+fn play_with(
+    connection: &mut Connection,
+    wrap: impl Fn(Response) -> Response,
+    spawn: CaptureSpawner,
+) -> Response {
     let Some(active) = connection.sessions.active() else {
         return Response::new(404, "Not Found");
     };
     if connection.capture_thread.is_none() {
         let stop = Arc::clone(&connection.stop_capture);
-        let hub = connection.hub.clone();
+        let hub = Arc::new(connection.hub.clone());
         let output = active.output.clone();
         let (width, height, fps) = (
             u32::from(active.mode.width),
             u32::from(active.mode.height),
             u32::from(active.mode.fps),
         );
-        connection.capture_thread = thread::Builder::new()
-            .name(String::from("osc-capture"))
-            .spawn(move || capture_loop(&hub, &output, width, height, fps, &stop))
-            .ok();
-        connection.hub.emit(&IpcEvent::session_phase(
-            &active.output,
-            phase::CASTING,
-            Some(String::from("PLAY")),
-        ));
+        match spawn(
+            Arc::clone(&hub),
+            output.clone(),
+            width,
+            height,
+            fps,
+            Arc::clone(&stop),
+        ) {
+            Ok(thread) => {
+                connection.capture_thread = Some(thread);
+                hub.emit(&IpcEvent::session_phase(
+                    &output,
+                    phase::CASTING,
+                    Some(String::from("PLAY")),
+                ));
+            }
+            Err(error) => {
+                // #96: never tell the client playback started when there is no
+                // capture loop. The panel gets a terminal error event instead.
+                tracing::warn!(%error, "capture thread could not be spawned");
+                hub.emit(&IpcEvent::session_phase(
+                    &output,
+                    phase::ERROR,
+                    Some(format!("capture thread could not be spawned: {error}")),
+                ));
+                return wrap(Response::new(500, "Internal Server Error"));
+            }
+        }
     }
     let mut response = Response::ok();
     response.headers.insert("Session", "1");
@@ -507,6 +551,39 @@ mod tests {
         assert!(connection.capture_thread.is_none());
         // Teardown also cancels the session, freeing the slot.
         assert!(!sessions.is_streaming());
+    }
+
+    #[test]
+    fn play_reports_error_when_capture_thread_cannot_spawn() {
+        let hub = IpcHub::new();
+        let events = hub.subscribe();
+        let sessions = Arc::new(SessionManager::with_outputs(
+            Arc::new(CountingOutputs::default()),
+            IpcHub::new(),
+        ));
+        sessions.launch(&params()).unwrap();
+        let mut connection = Connection::new(sessions, hub);
+
+        let response = play_with(
+            &mut connection,
+            |response| response,
+            |_, _, _, _, _, _| Err(io::Error::other("no threads")),
+        );
+
+        assert_eq!(response.status, 500);
+        assert!(connection.capture_thread.is_none());
+        match events.try_recv().unwrap() {
+            IpcEvent::Phase {
+                phase: event_phase,
+                detail,
+                ..
+            } => {
+                assert_eq!(event_phase, phase::ERROR);
+                assert!(detail.unwrap().contains("no threads"));
+            }
+            other => panic!("unexpected IPC event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

@@ -165,18 +165,27 @@ fn pair(state: &DaemonState, request: &Request, peer: Peer<'_>) -> Result<Respon
         .query_param("devicename")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| String::from("Unknown device"));
-    // `/pair` is not one step, it is a **phrase dispatcher**. A captured
-    // Moonlight 6.2.0 client drives the whole handshake through this one path:
+    // `/pair` is not one step: a real Moonlight client drives the whole
+    // handshake through this path. The captured first request is
     //
     // ```text
     // GET /pair?…&phrase=getservercert&salt=<hex>&clientcert=<hex>
     // ```
     //
-    // An earlier design put each phase on its own route (`/clientchallenge`,
-    // `/serverchallengeresp`, `/clientpairingsecret`). Those routes are still
-    // served, but a real client never calls them: it switches on `phrase`. So
-    // the phrase is read here and dispatched, and the dedicated routes remain as
-    // a compatibility surface for clients that do use them.
+    // Later phases are distinguished by the query key carrying their payload
+    // (`clientchallenge`, `serverchallengeresp`, `clientpairingsecret`). Some
+    // clients echo those names in `phrase=` too, so both spellings are accepted
+    // here. The dedicated routes remain a compatibility surface for clients
+    // that still call them.
+    if let Some(challenge) = request.query_param("clientchallenge") {
+        return pair_client_challenge(state, &challenge, peer.address);
+    }
+    if request.query_param("serverchallengeresp").is_some() {
+        return pair_server_challenge_response(state, peer.address);
+    }
+    if let Some(secret) = request.query_param("clientpairingsecret") {
+        return pair_client_pairing_secret(state, request, &secret, peer);
+    }
     let phrase = request
         .query_param("phrase")
         .unwrap_or_else(|| String::from("getservercert"));
@@ -202,6 +211,16 @@ fn pair(state: &DaemonState, request: &Request, peer: Peer<'_>) -> Result<Respon
             }
             Ok(xml_response(xml::server_certificate(pem)))
         }
+        // A discovery keep-alive: acknowledge it, but do not disturb the
+        // pairing session that may already be waiting for the operator.
+        "pairchallenge" => Ok(xml_response(xml::status(true))),
+        "clientchallenge" => Err(HttpError::BadRequest(String::from(
+            "missing clientchallenge",
+        ))),
+        "serverchallengeresp" => pair_server_challenge_response(state, peer.address),
+        "clientpairingsecret" => Err(HttpError::BadRequest(String::from(
+            "missing clientpairingsecret",
+        ))),
         // Unknown phrase: answer the acknowledgement the state machine already
         // models, and log it, because an unseen phrase is a protocol finding.
         other => {
@@ -212,6 +231,75 @@ fn pair(state: &DaemonState, request: &Request, peer: Peer<'_>) -> Result<Respon
             Ok(xml_response(xml::status(true)))
         }
     }
+}
+
+/// Phase 2 driven by a `/pair?clientchallenge=<hex>` request.
+fn pair_client_challenge(
+    state: &DaemonState,
+    hex: &str,
+    address: &str,
+) -> Result<Response, HttpError> {
+    let challenge = xml::hex_decode(hex)
+        .map_err(|error| HttpError::BadRequest(format!("invalid client challenge: {error}")))?;
+    let id = ensure_session(state, address)?;
+    // A retry after approval already has a response; return it again.
+    if let Some(response) = state.challenge_response(&id) {
+        return Ok(xml_response(xml::challengeresponse(
+            &response.challenge,
+            &response.proof,
+        )));
+    }
+    if let Some(response) = state.accept_client_challenge(&id, challenge)? {
+        return Ok(xml_response(xml::challengeresponse(
+            &response.challenge,
+            &response.proof,
+        )));
+    }
+    Ok(xml_response(xml::status(true)))
+}
+
+/// Phase 3 driven by a `/pair?serverchallengeresp=<hex>` request.
+fn pair_server_challenge_response(
+    state: &DaemonState,
+    address: &str,
+) -> Result<Response, HttpError> {
+    let Some(id) = state.session_for_address(address) else {
+        return Err(HttpError::BadRequest(String::from("no pairing request")));
+    };
+    match state.phase_of(&id) {
+        Some(PairingPhase::AwaitingClientSecret) | Some(PairingPhase::Complete) => {}
+        // The operator has not approved yet; the client must poll again.
+        Some(PairingPhase::AwaitingApproval) | Some(PairingPhase::AwaitingClientChallenge) => {
+            return Ok(xml_response(xml::status(false)));
+        }
+        None => return Err(HttpError::BadRequest(String::from("no pairing request"))),
+    }
+    match state.challenge_response(&id) {
+        Some(response) => Ok(xml_response(xml::pairingsecret(&response.proof))),
+        None => Ok(xml_response(xml::status(false))),
+    }
+}
+
+/// Phase 4 driven by a `/pair?clientpairingsecret=<hex>` request.
+fn pair_client_pairing_secret(
+    state: &DaemonState,
+    request: &Request,
+    hex: &str,
+    peer: Peer<'_>,
+) -> Result<Response, HttpError> {
+    let proof = xml::hex_decode(hex)
+        .map_err(|error| HttpError::BadRequest(format!("invalid pairing secret: {error}")))?;
+    let Some(id) = state.session_for_address(peer.address) else {
+        return Err(HttpError::BadRequest(String::from("no pairing request")));
+    };
+    // The first `/pair` request normally carried the certificate; a later
+    // query value or the TLS peer certificate can refresh it.
+    let query_certificate = request
+        .query_param("clientcert")
+        .and_then(|pem| xml::hex_decode(&pem).ok());
+    let certificate = peer.certificate_der.or(query_certificate.as_deref());
+    state.accept_client_secret(&id, &proof, certificate)?;
+    Ok(xml_response(xml::status(true)))
 }
 
 fn client_challenge(
@@ -571,6 +659,92 @@ mod tests {
             state.client_certificate_der(&id).as_deref(),
             Some(b"client-der".as_slice())
         );
+    }
+
+    #[test]
+    fn pair_phases_drive_the_whole_handshake_on_one_path() {
+        use gs_crypto::PairingCrypto as _;
+
+        let (_dir, state) = state();
+        let der = Identity::generate("client")
+            .unwrap()
+            .certificate_der()
+            .unwrap();
+        let salt = b"fixed-salt-bytes";
+        let pin = Pin::parse("1234").unwrap();
+
+        let mut start = request("GET", "/pair", "");
+        start.query = format!(
+            "devicename=TV&phrase=getservercert&salt={}&clientcert={}",
+            xml::hex_encode(salt),
+            xml::hex_encode(&der)
+        );
+        assert_eq!(handle(&state, &start, peer("10.0.0.2")).status, 200);
+        let id = state.session_for_address("10.0.0.2").unwrap();
+
+        let mut challenge = request("GET", "/pair", "");
+        challenge.query = format!(
+            "phrase=clientchallenge&clientchallenge={}",
+            xml::hex_encode(b"client-challenge")
+        );
+        assert_eq!(handle(&state, &challenge, peer("10.0.0.2")).status, 200);
+        assert_eq!(state.phase_of(&id), Some(PairingPhase::AwaitingApproval));
+
+        let server_challenge = state
+            .approve_pairing(&id, &pin)
+            .unwrap()
+            .expect("client challenge was recorded");
+        let mut response = request("GET", "/pair", "");
+        response.query = String::from("phrase=serverchallengeresp&serverchallengeresp=00");
+        let reply = handle(&state, &response, peer("10.0.0.2"));
+        assert_eq!(reply.status, 200);
+        let doc = Element::parse(&String::from_utf8(reply.body).unwrap()).unwrap();
+        assert_eq!(doc.child_text("paired"), Some("1"));
+        let expected_secret = xml::hex_encode(&server_challenge.proof);
+        assert_eq!(
+            doc.child_text("pairingsecret"),
+            Some(expected_secret.as_str())
+        );
+
+        let key = gs_crypto::ReferenceCrypto
+            .derive_pin_key(&pin, salt)
+            .unwrap();
+        let proof = gs_crypto::ReferenceCrypto
+            .expected_client_proof(&key, &server_challenge.challenge)
+            .unwrap();
+        let mut secret = request("GET", "/pair", "");
+        secret.query = format!(
+            "phrase=clientpairingsecret&clientpairingsecret={}",
+            xml::hex_encode(&proof)
+        );
+        let reply = handle(&state, &secret, peer("10.0.0.2"));
+        assert_eq!(reply.status, 200);
+        let doc = Element::parse(&String::from_utf8(reply.body).unwrap()).unwrap();
+        assert_eq!(doc.child_text("paired"), Some("1"));
+        assert_eq!(state.phase_of(&id), Some(PairingPhase::Complete));
+        assert!(state.is_paired());
+    }
+
+    #[test]
+    fn pair_challenge_phrase_is_an_acknowledgement_without_a_session() {
+        let (_dir, state) = state();
+        let mut request = request("GET", "/pair", "");
+        request.query = String::from("phrase=pairchallenge");
+        let response = handle(&state, &request, peer("10.0.0.2"));
+        assert_eq!(response.status, 200);
+        let doc = Element::parse(&String::from_utf8(response.body).unwrap()).unwrap();
+        assert_eq!(doc.child_text("paired"), Some("1"));
+        assert!(state.pending_pairings().is_empty());
+    }
+
+    #[test]
+    fn pair_rejects_a_malformed_phase_payload() {
+        let (_dir, state) = state();
+        let mut request = request("GET", "/pair", "");
+        request.query = String::from("clientchallenge=not-hex");
+        let response = handle(&state, &request, peer("10.0.0.2"));
+        assert_eq!(response.status, 200);
+        assert_eq!(protocol_status(&response), "400");
     }
 
     #[test]

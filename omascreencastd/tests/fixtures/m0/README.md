@@ -68,11 +68,12 @@ Findings from the pairing-start capture (`moonlight-pair-request.jsonl`),
     and had never been exercised by a client that was actually pairing. It is
     corrected here: the discovery listener now serves the pairing start,
     gated by `Route::allows_unpaired`, so no session route is reachable there.
-12. **`/pair` is a phrase dispatcher, not one step.** The whole handshake is
-    driven by `phrase=` values on this single path. The separate
-    `/clientchallenge`, `/serverchallengeresp`, and `/clientpairingsecret`
-    routes the M1 design assumed are still served for compatibility, but a real
-    client never calls them.
+12. **`/pair` drives the whole handshake, not just one step.** The captured
+    first request carries `phrase=getservercert`; the later phases are keyed by
+    the payload query parameter (`clientchallenge`, `serverchallengeresp`,
+    `clientpairingsecret`) on the same path. The separate routes the M1 design
+    assumed are still served for compatibility, but a real client never calls
+    them.
 13. **The salt is chosen by the client and sent on the first request**
     (`salt=<32 hex chars>`). The host minting the salt — the M1 design — means
     the two sides can never agree on key material, so the KDF could not have

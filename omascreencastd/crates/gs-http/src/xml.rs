@@ -75,6 +75,27 @@ pub fn challenge_response(challenge: &[u8], proof: &[u8]) -> Element {
     )
 }
 
+/// Phase-2 response for a real client that drives `/pair` by query keys.
+///
+/// Moonlight reads a single hex `challengeresponse` element; the clean-room
+/// model carries the host challenge and its proof concatenated in that value.
+#[must_use]
+pub fn challengeresponse(challenge: &[u8], proof: &[u8]) -> Element {
+    let mut bytes = challenge.to_vec();
+    bytes.extend_from_slice(proof);
+    Element::new(ROOT)
+        .child(Element::with_text("paired", "1"))
+        .child(Element::with_text("challengeresponse", hex_encode(&bytes)))
+}
+
+/// Phase-3 response for a real client that drives `/pair` by query keys.
+#[must_use]
+pub fn pairingsecret(secret: &[u8]) -> Element {
+    Element::new(ROOT)
+        .child(Element::with_text("paired", "1"))
+        .child(Element::with_text("pairingsecret", hex_encode(secret)))
+}
+
 /// The client's proof of the server's challenge.
 #[must_use]
 pub fn client_pairing_secret(document: &Element) -> Option<Vec<u8>> {
@@ -141,6 +162,18 @@ mod tests {
         let response = parsed.find("challengeresp").unwrap();
         assert_eq!(response.child_text("challenge"), Some("010203"));
         assert_eq!(response.child_text("response"), Some("040506"));
+    }
+
+    #[test]
+    fn real_client_pair_phases_use_single_value_elements() {
+        let phase2 =
+            Element::parse(&challengeresponse(&[1, 2], &[3, 4]).to_xml().unwrap()).unwrap();
+        assert_eq!(phase2.child_text("paired"), Some("1"));
+        assert_eq!(phase2.child_text("challengeresponse"), Some("01020304"));
+
+        let phase3 = Element::parse(&pairingsecret(&[5, 6]).to_xml().unwrap()).unwrap();
+        assert_eq!(phase3.child_text("paired"), Some("1"));
+        assert_eq!(phase3.child_text("pairingsecret"), Some("0506"));
     }
 
     #[test]
