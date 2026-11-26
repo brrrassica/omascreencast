@@ -628,6 +628,18 @@ def available_encoders() -> set[str]:
     return _ENCODER_CACHE
 
 
+def _available_encoder(encoders: set[str], allow_experimental_av1: bool = False) -> str:
+    """Pick a usable encoder, preferring the historical H.264 safe default."""
+    order = ["h264", "vp9", "hevc"]
+    if allow_experimental_av1:
+        order.append("av1")
+    for codec in order:
+        encoder = CODEC_MAP[codec]
+        if encoder in encoders:
+            return encoder
+    return ""
+
+
 def resolve_codec(
     requested: str,
     log: logging.Logger,
@@ -653,10 +665,13 @@ def resolve_codec(
         encoder = CODEC_MAP.get(requested, "h264_vaapi")
         if encoder not in encoders:
             log.warning(
-                "requested codec %s needs unavailable encoder %s; falling back to h264",
+                "requested codec %s needs unavailable encoder %s; choosing an available encoder",
                 requested, encoder,
             )
-            return "h264_vaapi" if "h264_vaapi" in encoders else encoder
+            fallback = _available_encoder(encoders, allow_experimental_av1)
+            if fallback:
+                return fallback
+            log.error("no video encoders are available from ffmpeg; using %s as a last resort", encoder)
         return encoder
 
     if codecs is None:
@@ -679,7 +694,17 @@ def resolve_codec(
             return encoder
         log.warning("receiver advertises %s but encoder %s is unavailable", codec, encoder)
 
-    log.info("codec auto -> h264_vaapi (no compatible negotiation; safe default)")
+    # #95: never return h264_vaapi without checking that ffmpeg actually
+    # provides it. Keep H.264 as the safe default when available, otherwise
+    # fall through the remaining usable encoders.
+    fallback = _available_encoder(encoders, allow_experimental_av1)
+    if fallback:
+        log.info(
+            "codec auto -> %s (no compatible negotiation; available fallback)",
+            fallback,
+        )
+        return fallback
+    log.error("no video encoders are available from ffmpeg; using h264_vaapi as a last resort")
     return "h264_vaapi"
 
 
@@ -707,23 +732,30 @@ def detect_capture_backend(
     lets us pin a short GOP (`-p g=...`); `wl-screenrec` does not expose one, so
     with LL-HLS enabled we prefer `wf-recorder`. `wl-screenrec` remains the
     fallback and is honoured when explicitly requested (or when LL parts are
-    disabled).
+    disabled). Raises ``RuntimeError`` when no capture tool is installed so
+    the caller can fail fast instead of spawning a nonexistent binary (#98).
     """
     requested = str(requested or "auto")
-    if requested in ("wf-recorder", "wl-screenrec"):
-        if shutil.which(requested):
+    found = {
+        "wf-recorder": shutil.which("wf-recorder"),
+        "wl-screenrec": shutil.which("wl-screenrec"),
+    }
+    if requested in found:
+        if found[requested]:
             return requested
         log.warning("capture backend %s not found; using auto", requested)
-    if ll_hls and shutil.which("wf-recorder"):
+    if ll_hls and found["wf-recorder"]:
         return "wf-recorder"
-    if shutil.which("wl-screenrec"):
+    if found["wl-screenrec"]:
         if ll_hls:
             log.warning(
                 "wf-recorder not found; wl-screenrec cannot pin a GOP, so "
                 "LL-HLS part timing may drift"
             )
         return "wl-screenrec"
-    return "wf-recorder"
+    raise RuntimeError(
+        "no capture backend available: install wf-recorder or wl-screenrec"
+    )
 
 
 def tool_help(name: str) -> str:
@@ -1469,7 +1501,16 @@ def cmd_stream(args: argparse.Namespace) -> int:
     )
     gop = args.gop or max(1, args.fps // 2)
     render_node = detect_render_node(args.render_node)
-    backend = detect_capture_backend(args.backend, log, ll_hls=not args.no_ll)
+    try:
+        backend = detect_capture_backend(args.backend, log, ll_hls=not args.no_ll)
+    except RuntimeError as exc:
+        # #98: fail before binding a port or spawning anything when no
+        # capture tool exists; a clear error phase beats a later opaque
+        # "could not start capture pipeline" from Popen.
+        log.error("%s", exc)
+        emit({"type": "phase", "phase": "error", "detail": str(exc)})
+        session_state.mark_stopped("error")
+        return 1
     log.info("capture backend=%s render-node=%s codec=%s gop=%s", backend, render_node, codec, gop)
 
     # Install signal handlers before any child process or server exists, so a
@@ -1516,6 +1557,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
                 "detail": f"cannot bind {ip}:{args.port}: {exc}",
             })
             terminal_phase = "error"
+            failed = True
             return 1
         srv.daemon_threads = True
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -1563,6 +1605,9 @@ def cmd_stream(args: argparse.Namespace) -> int:
         if not buf.wait_ready(timeout=10):
             log.error("pipeline produced no segments in time")
             emit({"type": "phase", "phase": "error", "detail": "no segments produced"})
+            # #97: early error returns must agree with the finally block.
+            terminal_phase = "error"
+            failed = True
             return 1
 
         emit({"type": "phase", "phase": "discovering", "detail": "locating receiver"})
@@ -1584,6 +1629,8 @@ def cmd_stream(args: argparse.Namespace) -> int:
         if cast is None:
             log.error("receiver not found device=%s host=%s", args.device, args.host)
             emit({"type": "phase", "phase": "error", "detail": "receiver not found"})
+            terminal_phase = "error"
+            failed = True
             return 1
 
         try:
@@ -1618,6 +1665,8 @@ def cmd_stream(args: argparse.Namespace) -> int:
                 "type": "phase", "phase": "error",
                 "detail": f"receiver did not start playback (state={state})",
             })
+            terminal_phase = "error"
+            failed = True
             return 1
 
         session_state.update_active({
@@ -1645,6 +1694,10 @@ def cmd_stream(args: argparse.Namespace) -> int:
             if cap.poll() is not None or ff.poll() is not None:
                 log.warning("pipeline process exited early")
                 emit({"type": "phase", "phase": "error", "detail": "capture/encode exited"})
+                # #94: keep the session file, terminal event and exit code in
+                # agreement instead of reporting a clean stop afterwards.
+                terminal_phase = "error"
+                failed = True
                 break
             time.sleep(0.5)
     except (OSError, subprocess.SubprocessError) as exc:

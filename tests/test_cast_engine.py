@@ -10,6 +10,7 @@ Run with:  python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import sys
 import threading
@@ -73,8 +74,16 @@ class CaptureBackendTest(unittest.TestCase):
                                side_effect=lambda n: "/usr/bin/wf-recorder" if n == "wf-recorder" else None):
             self.assertEqual(self.cast.detect_capture_backend("auto", self.log), "wf-recorder")
 
-    def test_explicit_missing_backend_falls_back(self):
+    def test_no_capture_backend_fails_fast(self):
         with mock.patch.object(self.cast.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "no capture backend"):
+                self.cast.detect_capture_backend("auto", self.log)
+            with self.assertRaisesRegex(RuntimeError, "no capture backend"):
+                self.cast.detect_capture_backend("wl-screenrec", self.log)
+
+    def test_explicit_missing_backend_falls_back_to_installed_tool(self):
+        with mock.patch.object(self.cast.shutil, "which",
+                               side_effect=lambda n: "/usr/bin/wf-recorder" if n == "wf-recorder" else None):
             self.assertEqual(self.cast.detect_capture_backend("wl-screenrec", self.log), "wf-recorder")
 
     def test_wf_recorder_command_has_low_latency_flags(self):
@@ -171,6 +180,26 @@ class CodecNegotiationTest(unittest.TestCase):
             self.cast.resolve_codec("auto", self.log, codecs=["hevc", "h264"]),
             "h264_vaapi",
         )
+
+    def test_auto_uses_available_encoder_when_h264_vaapi_is_missing(self):
+        # #95: the safe default must still be checked against ffmpeg.
+        self.cast._ENCODER_CACHE = {"libvpx-vp9"}
+        self.assertEqual(
+            self.cast.resolve_codec("auto", self.log, codecs=[]),
+            "libvpx-vp9",
+        )
+
+    def test_explicit_unavailable_encoder_uses_another_installed_encoder(self):
+        self.cast._ENCODER_CACHE = {"libvpx-vp9"}
+        self.assertEqual(self.cast.resolve_codec("hevc", self.log), "libvpx-vp9")
+
+    def test_no_encoders_available_is_reported(self):
+        self.cast._ENCODER_CACHE = set()
+        self.assertEqual(
+            self.cast.resolve_codec("auto", self.log, codecs=[]),
+            "h264_vaapi",
+        )
+        self.log.error.assert_called_once()
 
 
 class LanIpTest(unittest.TestCase):
@@ -498,6 +527,113 @@ class StreamSetupUnwindTest(unittest.TestCase):
         server.shutdown.assert_called_once()
         server.server_close.assert_called_once()
         mark_stopped.assert_called_once_with("error")
+        self.assertTrue(any(e.get("phase") == "error" for e in emitted))
+
+
+class StreamTerminalPhaseTest(unittest.TestCase):
+    """#94/#97: error exits must not be reported as a clean stop afterwards."""
+
+    def setUp(self):
+        self.cast = _load()
+
+    def _run(self, *, ready=True, playback="PLAYING", select_cast="default", cap_exit=False):
+        emitted = []
+        server = mock.Mock()
+        cap = mock.Mock()
+        cap.poll.return_value = 1 if cap_exit else None
+        ff = mock.Mock()
+        ff.poll.return_value = None
+        receiver = mock.Mock()
+        args = argparse.Namespace(
+            debug=False, device="device-uuid", host="", output="HEADLESS-1",
+            codec="auto", fps=30, bitrate="6M", port=7236,
+            render_node="auto", backend="auto", experimental_av1=False,
+            gop=0, part_dur=1.0, seg_parts=5, list_parts=10,
+            keep_segments=10, no_ll=False, duration=0.0,
+        )
+        buf = mock.Mock()
+        buf.wait_ready.return_value = ready
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(self.cast, "setup_logging",
+                                                  return_value=mock.Mock()))
+            pychromecast = mock.Mock()
+            pychromecast.get_chromecasts.return_value = ([], None)
+            stack.enter_context(mock.patch.dict(sys.modules, {"pychromecast": pychromecast}))
+            stack.enter_context(mock.patch.object(self.cast.signal, "signal"))
+            stack.enter_context(mock.patch.object(self.cast.session_state, "update_active"))
+            stack.enter_context(mock.patch.object(self.cast.session_state, "device_info",
+                                                  return_value={"host": "192.0.2.10"}))
+            mark_stopped = stack.enter_context(
+                mock.patch.object(self.cast.session_state, "mark_stopped"))
+            stack.enter_context(mock.patch.object(self.cast, "resolve_codec",
+                                                  return_value="h264"))
+            stack.enter_context(mock.patch.object(self.cast, "detect_render_node",
+                                                  return_value=""))
+            stack.enter_context(mock.patch.object(self.cast, "detect_capture_backend",
+                                                  return_value="wf-recorder"))
+            stack.enter_context(mock.patch.object(self.cast, "lan_ip",
+                                                  return_value="192.0.2.10"))
+            stack.enter_context(mock.patch.object(self.cast.http.server,
+                                                  "ThreadingHTTPServer", return_value=server))
+            stack.enter_context(mock.patch.object(self.cast.threading, "Thread"))
+            stack.enter_context(mock.patch.object(self.cast.tempfile, "mkdtemp",
+                                                  return_value="/tmp/omascreencast-test"))
+            stack.enter_context(mock.patch.object(self.cast.os, "mkfifo"))
+            stack.enter_context(mock.patch.object(self.cast.subprocess, "Popen",
+                                                  side_effect=[cap, ff]))
+            stack.enter_context(mock.patch.object(self.cast, "segmenter"))
+            stack.enter_context(mock.patch.object(self.cast, "HlsBuffer", return_value=buf))
+            stack.enter_context(mock.patch.object(self.cast, "_select_cast",
+                                                  return_value=receiver if select_cast == "default" else select_cast))
+            stack.enter_context(mock.patch.object(self.cast, "force_takeover",
+                                                  return_value=True))
+            stack.enter_context(mock.patch.object(self.cast, "wait_for_playback",
+                                                  return_value=playback))
+            stack.enter_context(mock.patch.object(self.cast.time, "sleep"))
+            stack.enter_context(mock.patch.object(self.cast, "emit", side_effect=emitted.append))
+            code = self.cast.cmd_stream(args)
+        return code, mark_stopped, emitted
+
+    def _assert_error_exit(self, code, mark_stopped, emitted):
+        self.assertEqual(code, 1)
+        mark_stopped.assert_called_once_with("error")
+        self.assertTrue(any(e.get("phase") == "error" for e in emitted))
+        self.assertFalse(any(e.get("phase") == "idle" for e in emitted))
+
+    def test_no_segments_returns_error_terminal_phase(self):
+        self._assert_error_exit(*self._run(ready=False))
+
+    def test_receiver_not_found_returns_error_terminal_phase(self):
+        self._assert_error_exit(*self._run(select_cast=None))
+
+    def test_playback_failure_returns_error_terminal_phase(self):
+        self._assert_error_exit(*self._run(playback="IDLE"))
+
+    def test_pipeline_exit_returns_error_terminal_phase(self):
+        self._assert_error_exit(*self._run(cap_exit=True))
+
+    def test_missing_capture_backend_fails_before_binding(self):
+        args = argparse.Namespace(
+            debug=False, codec="auto", fps=30, render_node="auto", backend="auto",
+            experimental_av1=False, device="device-uuid", host="", no_ll=False,
+            output="HEADLESS-1", bitrate="6M", port=7236, gop=0,
+        )
+        emitted = []
+        with mock.patch.object(self.cast, "setup_logging", return_value=mock.Mock()), \
+                mock.patch.dict(sys.modules, {"pychromecast": mock.Mock()}), \
+                mock.patch.object(self.cast.session_state, "device_info",
+                                  return_value={}), \
+                mock.patch.object(self.cast.session_state, "mark_stopped") as mark_stopped, \
+                mock.patch.object(self.cast, "resolve_codec", return_value="h264"), \
+                mock.patch.object(self.cast, "detect_render_node", return_value=""), \
+                mock.patch.object(self.cast, "detect_capture_backend",
+                                  side_effect=RuntimeError("no capture backend")), \
+                mock.patch.object(self.cast.http.server, "ThreadingHTTPServer") as server, \
+                mock.patch.object(self.cast, "emit", side_effect=emitted.append):
+            code = self.cast.cmd_stream(args)
+        self.assertEqual(code, 1)
+        mark_stopped.assert_called_once_with("error")
+        server.assert_not_called()
         self.assertTrue(any(e.get("phase") == "error" for e in emitted))
 
 
